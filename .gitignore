@@ -1,0 +1,14 @@
+#dataset
+data/
+#python cache
+__pycache__/
+#logs 
+runs/
+#files_processed
+utils/file_processing/
+.vscode/
+utils/__pycache__/
+#checkpoints
+outputs/models/ 
+
+

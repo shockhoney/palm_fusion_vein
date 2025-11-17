@@ -7,27 +7,23 @@ import torchvision.transforms as transforms
 import os
 from tqdm import tqdm
 from utils.loss import get_stage1_loss, get_stage2_loss
-from utils.dataset import ContrastDataset, PairDataset
+from utils.dataset import SimpleDataset, PairDataset
 from utils.metrics import compute_eer, roc_auc, tar_at_far
 from sklearn.metrics.pairwise import cosine_similarity
 import itertools
-from models.stage1 import EfficientViT, ConvNeXt
+from models.stage1 import ConvNeXt
 from models.stage2 import Stage2FusionCA 
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     save_dir = 'outputs/models' 
-    palm_dir1, vein_dir1 = 'C:/Users/admin/Desktop/palm_vein_fusion/data/CASIA_dataset/vi', 'C:/Users/admin/Desktop/palm_vein_fusion/data/CASIA_dataset/ir'
-    palm_dir2, vein_dir2 = 'C:/Users/admin/Desktop/palm_vein_fusion/data/PolyU/NIR', 'C:/Users/admin/Desktop/palm_vein_fusion/data/PolyU/Red'
-    p1_epochs, p1_batch, p1_lr = 50, 8, 1e-4 
-    p1_patience = 8 
-    
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 50, 8, 1e-4, 1e-5 
+    palm_dir1, vein_dir1 = 'C:/Users\ganji/Desktop/pp_pv_fusion/data/CASIA_dataset/vi', 'C:/Users\ganji/Desktop/pp_pv_fusion/data/CASIA_dataset/ir'
+    palm_dir2, vein_dir2 = 'C:/Users/ganji/Desktop/pp_pv_fusion/data/PolyU/NIR', 'C:/Users/ganji/Desktop/pp_pv_fusion/data/PolyU/Red'
+    p1_epochs, p1_batch, p1_lr = 150, 8, 1e-4
+    p1_patience = 140 
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 100, 8, 1e-4, 1e-5 
     p2_patience = 15 
     num_classes, train_ratio = 100, 0.8
-    
-    dim = 64            # 网络特征主通道数
-    num_heads = 8       # 多头注意力机制的头数
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
@@ -72,112 +68,24 @@ def get_transforms(strong=True):
     base += [transforms.ToTensor(), transforms.Normalize(mean=[0.5], std=[0.5])]
     return transforms.Compose(base)
 
-# ============================================================
-# 第一阶段：预训练特征提取器（ViT和CNN）
-# ============================================================
-def train_phase1_vit(vit_model, config, writer=None, model_name='vit_palm'):
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    dataset = ContrastDataset(config.palm_dir1, config.vein_dir1, get_transforms(strong=True))
-    loader = DataLoader(dataset, config.p1_batch, shuffle=True, num_workers=4, drop_last=True)
-
-    # 从数据集获取实际类别数
-    actual_num_classes = len(dataset.all_ids)
-
-    criterion = get_stage1_loss(
-        feat_dim=192, 
-        num_classes=actual_num_classes, 
-        triplet_margin=0.5,
-        triplet_mining='hard',
-        w_triplet=1.0,
-        w_identity=0.5
-    ).to(config.device)
-
-    optimizer = torch.optim.Adam(
-        list(vit_model.parameters()) + list(criterion.parameters()),
-        lr=config.p1_lr,
-        weight_decay=1e-3
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p1_epochs)
-    early_stop = EarlyStopping(patience=config.p1_patience, min_delta=0.001)
-
-    best_loss = float('inf')
-
-    for epoch in range(config.p1_epochs):
-        vit_model.train()
-        criterion.train()
-        epoch_loss = 0.0
-
-        pbar = tqdm(loader, desc=f'P1-{model_name} Epoch {epoch+1}/{config.p1_epochs}')
-        for batch_idx, (anchor, positive, negative, labels) in enumerate(pbar):
-            anchor = anchor.to(config.device)
-            positive = positive.to(config.device)
-            negative = negative.to(config.device)
-            labels = labels.to(config.device)
-
-            feat_a = vit_model(anchor, pool=True)  
-            feat_p = vit_model(positive, pool=True)
-            feat_n = vit_model(negative, pool=True)
-
-            total_loss, loss_dict = criterion(feat_a, feat_p, feat_n, labels)
-
-            optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(vit_model.parameters(), 1.0)
-            optimizer.step()
-
-            epoch_loss += total_loss.item()
-            pbar.set_postfix({
-                'loss': f"{total_loss.item():.4f}",
-                'trip': f"{loss_dict['triplet']:.3f}",
-                'iden': f"{loss_dict['identity']:.3f}",
-                'acc': f"{loss_dict['identity_acc']*100:.1f}%"
-            })
-
-            if writer is not None:
-                global_step = epoch * len(loader) + batch_idx
-                writer.add_scalar(f'Phase1_{model_name}/BatchLoss', total_loss.item(), global_step)
-                writer.add_scalar(f'Phase1_{model_name}/TripletLoss', loss_dict['triplet'], global_step)
-                writer.add_scalar(f'Phase1_{model_name}/IdentityLoss', loss_dict['identity'], global_step)
-                writer.add_scalar(f'Phase1_{model_name}/IdentityAcc', loss_dict['identity_acc'], global_step)
-
-        scheduler.step()
-        avg_loss = epoch_loss / len(loader)
-
-        if writer is not None:
-            writer.add_scalar(f'Phase1_{model_name}/EpochLoss', avg_loss, epoch)
-
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save({
-                'model': vit_model.state_dict(),
-                'criterion': criterion.state_dict()
-            }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
-
-        if early_stop(avg_loss, mode='min'):
-            break
-
-    return best_loss
-
-
 def train_phase1_cnn(cnn_model, config, writer=None, model_name='cnn_palm'):
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    dataset = ContrastDataset(config.palm_dir1, config.vein_dir1, get_transforms(strong=True))
+    dataset = SimpleDataset(config.palm_dir1, config.vein_dir1, get_transforms(strong=True))
     loader = DataLoader(dataset, config.p1_batch, shuffle=True, num_workers=4, drop_last=True)
 
-    actual_num_classes = len(dataset.all_ids)
+    actual_num_classes = dataset.num_classes
 
     criterion = get_stage1_loss(
-        feat_dim=768, 
-        num_classes=actual_num_classes, 
-        triplet_margin=0.5,
-        triplet_mining='hard',
-        w_triplet=1.0,
-        w_identity=0.5
+        feat_dim=768,
+        num_classes=actual_num_classes,
+        s=30.0,
+        m=0.35,           # 角度间隔
+        lambda_center=0.008,  #
+        lambda_margin=0.001,
+        margin=2.0
     ).to(config.device)
 
     optimizer = torch.optim.Adam(
@@ -193,20 +101,19 @@ def train_phase1_cnn(cnn_model, config, writer=None, model_name='cnn_palm'):
     for epoch in range(config.p1_epochs):
         cnn_model.train()
         criterion.train()
+        criterion.set_epoch(epoch)  # 设置当前epoch用于warmup
         epoch_loss = 0.0
 
         pbar = tqdm(loader, desc=f'P1-{model_name} Epoch {epoch+1}/{config.p1_epochs}')
-        for batch_idx, (anchor, positive, negative, labels) in enumerate(pbar):
-            anchor = anchor.to(config.device)
-            positive = positive.to(config.device)
-            negative = negative.to(config.device)
+        for batch_idx, (images, labels) in enumerate(pbar):
+            images = images.to(config.device)
             labels = labels.to(config.device)
 
-            feat_a = cnn_model(anchor, return_spatial=False) 
-            feat_p = cnn_model(positive, return_spatial=False)
-            feat_n = cnn_model(negative, return_spatial=False)
+            # CNN提取全局特征（用于分类）
+            features = cnn_model(images, return_spatial=False)  # (N, 768)
 
-            total_loss, loss_dict = criterion(feat_a, feat_p, feat_n, labels)
+            # 计算损失：ArcFace + Center Margin
+            total_loss, loss_dict = criterion(features, labels)
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -216,17 +123,18 @@ def train_phase1_cnn(cnn_model, config, writer=None, model_name='cnn_palm'):
             epoch_loss += total_loss.item()
             pbar.set_postfix({
                 'loss': f"{total_loss.item():.4f}",
-                'trip': f"{loss_dict['triplet']:.3f}",
-                'iden': f"{loss_dict['identity']:.3f}",
-                'acc': f"{loss_dict['identity_acc']*100:.1f}%"
+                'arc': f"{loss_dict['arcface']:.3f}",
+                'ctr': f"{loss_dict['center']:.3f}",
+                'acc': f"{loss_dict['acc']*100:.1f}%",
+                'warmup': f"{loss_dict.get('warmup', 0):.2f}"
             })
 
             if writer is not None:
                 global_step = epoch * len(loader) + batch_idx
                 writer.add_scalar(f'Phase1_{model_name}/BatchLoss', total_loss.item(), global_step)
-                writer.add_scalar(f'Phase1_{model_name}/TripletLoss', loss_dict['triplet'], global_step)
-                writer.add_scalar(f'Phase1_{model_name}/IdentityLoss', loss_dict['identity'], global_step)
-                writer.add_scalar(f'Phase1_{model_name}/IdentityAcc', loss_dict['identity_acc'], global_step)
+                writer.add_scalar(f'Phase1_{model_name}/ArcFaceLoss', loss_dict['arcface'], global_step)
+                writer.add_scalar(f'Phase1_{model_name}/CenterLoss', loss_dict['center'], global_step)
+                writer.add_scalar(f'Phase1_{model_name}/Accuracy', loss_dict['acc'], global_step)
 
         scheduler.step()
         avg_loss = epoch_loss / len(loader)
@@ -246,24 +154,20 @@ def train_phase1_cnn(cnn_model, config, writer=None, model_name='cnn_palm'):
 
     return best_loss
 
-
-
-# ============================================================
-# 第二阶段：多模态融合识别
-# ============================================================
-def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
+def train_phase2(cnn_palm, cnn_vein, config, writer=None):
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    for model, name in [(vit_palm, 'vit_palm'), (vit_vein, 'vit_vein'),
-                        (cnn_palm, 'cnn_palm'), (cnn_vein, 'cnn_vein')]:
+    # 加载第一阶段训练好的CNN模型权重
+    for model, name in [(cnn_palm, 'cnn_palm'), (cnn_vein, 'cnn_vein')]:
         ckpt_path = os.path.join(config.save_dir, f'{name}_phase1_best.pth')
         if os.path.exists(ckpt_path):
             checkpoint = torch.load(ckpt_path, map_location=config.device)
-            model.load_state_dict(checkpoint['model'])      
+            model.load_state_dict(checkpoint['model'])
+            print(f" Loaded {name} checkpoint from {ckpt_path}")
         else:
-            print(f" Warning: {name} checkpoint not found")
+            print(f" Warning: {name} checkpoint not found at {ckpt_path}")
 
     train_ds = PairDataset(config.palm_dir2, config.vein_dir2,
                           get_transforms(strong=True), split='train')
@@ -283,32 +187,31 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
                            shuffle=False, num_workers=4, pin_memory=True)
 
     fusion_model = Stage2FusionCA(
-        in_dim_global_palm=192,
-        in_dim_global_vein=192,
-        in_dim_local_palm=768,
-        in_dim_local_vein=768,
+        in_dim_global_palm=768,   # CNN全局特征维度
+        in_dim_global_vein=768,   # CNN全局特征维度
+        in_dim_local_palm=768,    # CNN空间特征维度
+        in_dim_local_vein=768,    # CNN空间特征维度
         out_dim_global=256,
         out_dim_local=256,
-        use_spatial_fusion=True,
+        use_spatial_fusion=True,  # 使用空间注意力融合
         final_l2norm=True,
         with_arcface=True,
         num_classes=num_classes_for_model,
-        arcface_s=30.0,          # 🔧 降低 scale（64->30）适配 500 类任务
-        arcface_m=0.20           # 🔧 降低 margin（0.5->0.2）避免过度惩罚
+        arcface_s=30.0,
+        arcface_m=0.20
     ).to(config.device)
 
-    freeze_stage1 = False 
+    freeze_stage1 = False # 设置为True以冻结第一阶段的CNN编码器
 
     if freeze_stage1:
-        for model in [vit_palm, vit_vein, cnn_palm, cnn_vein]:
+        for model in [cnn_palm, cnn_vein]:
             for param in model.parameters():
                 param.requires_grad = False
         optimizer = torch.optim.Adam(fusion_model.parameters(), lr=config.p2_lr, weight_decay=1e-2)
     else:
+        # 联合训练：融合模块用较大学习率，CNN编码器用较小学习率微调
         optimizer = torch.optim.Adam([
             {'params': fusion_model.parameters(), 'lr': config.p2_lr},
-            {'params': vit_palm.parameters(), 'lr': config.p2_enc_lr},
-            {'params': vit_vein.parameters(), 'lr': config.p2_enc_lr},
             {'params': cnn_palm.parameters(), 'lr': config.p2_enc_lr},
             {'params': cnn_vein.parameters(), 'lr': config.p2_enc_lr}
         ], weight_decay=1e-2)
@@ -317,19 +220,22 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
 
     criterion = get_stage2_loss(
         num_classes=num_classes_for_model,
-        feat_dim=512,
-        mode='simple'  # 🔧 使用 simple 模式（关闭 label_smoothing 和额外损失）
+        feat_dim=512,  # out_dim_global + out_dim_local = 256 + 256
+        lambda_balance=0.1,  # 门控平衡损失权重
+        lambda_diversity=0.05,  # 门控多样性损失权重
+        mode='standard'  # 使用标准模式：分类 + 门控正则化
     ).to(config.device)
 
     early_stop = EarlyStopping(patience=config.p2_patience, min_delta=0.1)
 
     best_acc = 0.0
     for epoch in range(config.p2_epochs):
+        # 设置模型训练/评估模式
         if freeze_stage1:
-            for model in [vit_palm, vit_vein, cnn_palm, cnn_vein]:
+            for model in [cnn_palm, cnn_vein]:
                 model.eval()
         else:
-            for model in [vit_palm, vit_vein, cnn_palm, cnn_vein]:
+            for model in [cnn_palm, cnn_vein]:
                 model.train()
         fusion_model.train()
 
@@ -344,13 +250,17 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
 
             if freeze_stage1:
                 with torch.no_grad():
-                    palm_global = vit_palm(palm_img, pool=True) 
-                    vein_global = vit_vein(vein_img, pool=True) 
-                    palm_local = cnn_palm(palm_img, return_spatial=True) 
-                    vein_local = cnn_vein(vein_img, return_spatial=True)  
+                    # CNN提取全局特征（return_spatial=False）
+                    palm_global = cnn_palm(palm_img, return_spatial=False)
+                    vein_global = cnn_vein(vein_img, return_spatial=False)
+                    # CNN提取局部空间特征（return_spatial=True）
+                    palm_local = cnn_palm(palm_img, return_spatial=True)
+                    vein_local = cnn_vein(vein_img, return_spatial=True)
             else:
-                palm_global = vit_palm(palm_img, pool=True)
-                vein_global = vit_vein(vein_img, pool=True)
+                # CNN提取全局特征（return_spatial=False）
+                palm_global = cnn_palm(palm_img, return_spatial=False)
+                vein_global = cnn_vein(vein_img, return_spatial=False)
+                # CNN提取局部空间特征（return_spatial=True）
                 palm_local = cnn_palm(palm_img, return_spatial=True)
                 vein_local = cnn_vein(vein_img, return_spatial=True)
 
@@ -376,8 +286,8 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
         train_loss = train_loss_sum / len(train_loader)
         train_acc = 100. * train_correct / train_total
 
-        # 验证
-        for model in [vit_palm, vit_vein, cnn_palm, cnn_vein, fusion_model]:
+        # 验证阶段
+        for model in [cnn_palm, cnn_vein, fusion_model]:
             model.eval()
 
         val_correct, val_total = 0, 0
@@ -388,8 +298,9 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
                 vein_img = vein_img.to(config.device)
                 labels = labels.to(config.device)
 
-                palm_global = vit_palm(palm_img, pool=True)
-                vein_global = vit_vein(vein_img, pool=True)
+                # CNN提取全局和局部特征
+                palm_global = cnn_palm(palm_img, return_spatial=False)
+                vein_global = cnn_vein(vein_img, return_spatial=False)
                 palm_local = cnn_palm(palm_img, return_spatial=True)
                 vein_local = cnn_vein(vein_img, return_spatial=True)
 
@@ -423,10 +334,13 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
                         break
                     palm, vein = palm.to(config.device), vein.to(config.device)
 
-                    palm_global = vit_palm(palm, pool=True)
-                    vein_global = vit_vein(vein, pool=True)
+                    # CNN提取全局和局部特征
+                    palm_global = cnn_palm(palm, return_spatial=False)
+                    vein_global = cnn_vein(vein, return_spatial=False)
                     palm_local = cnn_palm(palm, return_spatial=True)
                     vein_local = cnn_vein(vein, return_spatial=True)
+
+                    # 融合特征
                     fused_feat, _ = fusion_model(palm_global, vein_global, palm_local, vein_local)
 
                     all_features.append(fused_feat.cpu().numpy())
@@ -506,8 +420,6 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
             best_acc = val_acc
             torch.save({
                 'epoch': epoch + 1,
-                'vit_palm': vit_palm.state_dict(),
-                'vit_vein': vit_vein.state_dict(),
                 'cnn_palm': cnn_palm.state_dict(),
                 'cnn_vein': cnn_vein.state_dict(),
                 'fusion': fusion_model.state_dict(),
@@ -525,24 +437,7 @@ def train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer=None):
     return best_acc
 
 def main():
-
     writer = SummaryWriter(log_dir='outputs/runs/phase2_experiment')
-
-    vit_palm = EfficientViT(
-        img_size=224, in_chans=1,
-        embed_dim=[64, 128, 192],
-        key_dim=[16, 16, 16],
-        depth=[1, 2, 3],
-        num_heads=[4, 4, 4]
-    ).to(config.device)
-
-    vit_vein = EfficientViT(
-        img_size=224, in_chans=1,
-        embed_dim=[64, 128, 192],
-        key_dim=[16, 16, 16],
-        depth=[1, 2, 3],
-        num_heads=[4, 4, 4]
-    ).to(config.device)
 
     cnn_palm = ConvNeXt(
         in_chans=1,
@@ -556,20 +451,15 @@ def main():
         dims=[96, 192, 384, 768]
     ).to(config.device)
 
-    skip_stage1 = True  # 设置为 True 以跳过阶段1训练  
+    skip_stage1 = True  #设置为True以跳过第一阶段训练
 
     if not skip_stage1:
-
-        vit_palm_loss = train_phase1_vit(vit_palm, config, writer, 'vit_palm')
-        print(f" ViT Palm best loss: {vit_palm_loss:.4f}")
-        vit_vein_loss = train_phase1_vit(vit_vein, config, writer, 'vit_vein')
-        print(f" ViT Vein best loss: {vit_vein_loss:.4f}")
         cnn_palm_loss = train_phase1_cnn(cnn_palm, config, writer, 'cnn_palm')
         print(f" CNN Palm best loss: {cnn_palm_loss:.4f}")
         cnn_vein_loss = train_phase1_cnn(cnn_vein, config, writer, 'cnn_vein')
         print(f" CNN Vein best loss: {cnn_vein_loss:.4f}")
 
-    best_acc = train_phase2(vit_palm, vit_vein, cnn_palm, cnn_vein, config, writer)
+    best_acc = train_phase2(cnn_palm, cnn_vein, config, writer)
     print(f"Best Validation Accuracy: {best_acc:.2f}%")
 
     writer.close()

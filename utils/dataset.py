@@ -5,6 +5,60 @@ import random
 import torch
 
 
+class SimpleDataset(Dataset):
+    """Simple dataset for flat directory structure (Stage-1 training)
+
+    Expects filenames like: 001_l_01.jpg, 001_r_02.jpg
+    Where 001 is the person ID
+    """
+    def __init__(self, palm_dir, vein_dir, transform=None):
+        self.palm_dir = palm_dir
+        self.vein_dir = vein_dir
+        self.transform = transform
+        self.samples = []
+        self.id_to_label = {}
+
+        # Collect all images from both directories
+        all_files = []
+
+        # Palm images
+        if os.path.exists(palm_dir):
+            for f in os.listdir(palm_dir):
+                if f.lower().endswith(('.jpg', '.png', '.jpeg')):
+                    person_id = f.split('_')[0]
+                    all_files.append((os.path.join(palm_dir, f), person_id))
+
+        # Vein images
+        if os.path.exists(vein_dir):
+            for f in os.listdir(vein_dir):
+                if f.lower().endswith(('.jpg', '.png', '.jpeg')):
+                    person_id = f.split('_')[0]
+                    all_files.append((os.path.join(vein_dir, f), person_id))
+
+        # Create ID to label mapping
+        unique_ids = sorted(set(person_id for _, person_id in all_files))
+        self.id_to_label = {pid: idx for idx, pid in enumerate(unique_ids)}
+        self.num_classes = len(unique_ids)
+
+        # Create samples list
+        for path, person_id in all_files:
+            label = self.id_to_label[person_id]
+            self.samples.append((path, label))
+
+        print(f"SimpleDataset: {self.num_classes} classes, {len(self.samples)} samples")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        img = Image.open(img_path).convert('L')
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label
+
 
 class ContrastDataset(Dataset):   
     def __init__(self, palm_dir, vein_dir, transform=None):

@@ -1,5 +1,18 @@
 """测试脚本 - 使用改进的 Stage2FusionCA 模型
+
 支持完整的生物识别指标评估：EER, AUC, TAR@FAR 等
+
+主要改进：
+1. 使用 SubjectDisjointPairDataset 进行 subject-disjoint 划分
+2. 测试集中的身份在训练时完全未见，评估真实泛化能力
+3. 只使用 ConvNeXt 编码器（与训练代码一致）
+4. 跨模态空间注意力加权池化
+
+使用方法：
+1. 确保训练好的模型权重存在：outputs/models/stage2_best.pth
+2. 修改 Config 中的数据路径（需与训练时一致）
+3. 运行：python test.py
+4. 查看结果：outputs/test_results/test_results.txt
 """
 import os
 import numpy as np
@@ -18,9 +31,9 @@ warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.CRITICAL)
 
 # 导入模型和工具
-from models.stage1 import EfficientViT, ConvNeXt
+from models.stage1 import ConvNeXt
 from models.stage2 import Stage2FusionCA
-from utils.dataset import PairDataset
+from utils.dataset import SubjectDisjointPairDataset
 from utils.metrics import compute_eer, roc_auc, tar_at_far, far_frr_acc_at_threshold
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -28,16 +41,21 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    # 测试数据路径（修改为你的数据路径）
-    palm_dir = 'C:/Users/admin/Desktop/palm_vein_fusion/data/PolyU/NIR'
-    vein_dir = 'C:/Users/admin/Desktop/palm_vein_fusion/data/PolyU/Red'
+    # 测试数据路径（需与训练时一致）
+    palm_dir = 'C:/Users/ganji/Desktop/pp_pv_fusion/data/PolyU/NIR'
+    vein_dir = 'C:/Users/ganji/Desktop/pp_pv_fusion/data/PolyU/Red'
 
     # 模型权重路径
     ckpt_path = 'outputs/models/stage2_best.pth'
 
     # 模型配置（需与训练时一致）
-    num_classes = 100
+    num_classes = 100  # 训练集的类别数
     batch_size = 16
+
+    # Subject-disjoint 划分参数（需与训练时一致）
+    train_ratio = 0.8
+    val_ratio = 0.1
+    seed = 42
 
     # 是否保存 ROC 曲线图
     save_roc_curve = True
@@ -59,23 +77,7 @@ def load_models(config):
     """加载训练好的模型"""
     device = config.device
 
-    # 创建模型
-    vit_palm = EfficientViT(
-        img_size=224, in_chans=1,
-        embed_dim=[64, 128, 192],
-        key_dim=[16, 16, 16],
-        depth=[1, 2, 3],
-        num_heads=[4, 4, 4]
-    ).to(device)
-
-    vit_vein = EfficientViT(
-        img_size=224, in_chans=1,
-        embed_dim=[64, 128, 192],
-        key_dim=[16, 16, 16],
-        depth=[1, 2, 3],
-        num_heads=[4, 4, 4]
-    ).to(device)
-
+    # 创建 ConvNeXt 编码器（与训练时一致）
     cnn_palm = ConvNeXt(
         in_chans=1,
         depths=[3, 3, 9, 3],
@@ -88,14 +90,15 @@ def load_models(config):
         dims=[96, 192, 384, 768]
     ).to(device)
 
+    # 创建融合模型（与训练时一致）
     fusion_model = Stage2FusionCA(
-        in_dim_global_palm=192,
-        in_dim_global_vein=192,
-        in_dim_local_palm=768,
-        in_dim_local_vein=768,
+        in_dim_global_palm=768,   # CNN全局特征维度
+        in_dim_global_vein=768,   # CNN全局特征维度
+        in_dim_local_palm=768,    # CNN空间特征维度
+        in_dim_local_vein=768,    # CNN空间特征维度
         out_dim_global=256,
         out_dim_local=256,
-        use_spatial_fusion=True,
+        use_spatial_fusion=True,  # 使用空间注意力融合
         final_l2norm=True,
         with_arcface=False,  # 测试时不需要 ArcFace
         num_classes=config.num_classes
@@ -106,30 +109,30 @@ def load_models(config):
         print(f"Loading checkpoint from {config.ckpt_path}...")
         ckpt = torch.load(config.ckpt_path, map_location=device)
 
-        vit_palm.load_state_dict(ckpt['vit_palm'])
-        vit_vein.load_state_dict(ckpt['vit_vein'])
         cnn_palm.load_state_dict(ckpt['cnn_palm'])
         cnn_vein.load_state_dict(ckpt['cnn_vein'])
         fusion_model.load_state_dict(ckpt['fusion'])
 
-        print(f"✓ Checkpoint loaded (Best Acc: {ckpt.get('best_acc', 'N/A')})")
+        print(f"✓ Checkpoint loaded (Best Acc: {ckpt.get('best_acc', 'N/A'):.2f}%)")
     else:
         print(f"⚠ Warning: Checkpoint not found at {config.ckpt_path}")
         print("Using random initialization (for testing only)")
 
     # 设置为评估模式
-    for model in [vit_palm, vit_vein, cnn_palm, cnn_vein, fusion_model]:
+    for model in [cnn_palm, cnn_vein, fusion_model]:
         model.eval()
 
-    return vit_palm, vit_vein, cnn_palm, cnn_vein, fusion_model
+    return cnn_palm, cnn_vein, fusion_model
 
 
-def extract_features(vit_palm, vit_vein, cnn_palm, cnn_vein, fusion_model, palm_img, vein_img, device):
+def extract_features(cnn_palm, cnn_vein, fusion_model, palm_img, vein_img, device):
     """提取融合特征向量"""
     with torch.no_grad():
-        # Stage1: 特征提取
-        palm_global = vit_palm(palm_img, pool=True)  # (B, 192)
-        vein_global = vit_vein(vein_img, pool=True)  # (B, 192)
+        # CNN 提取全局特征（return_spatial=False）
+        palm_global = cnn_palm(palm_img, return_spatial=False)  # (B, 768)
+        vein_global = cnn_vein(vein_img, return_spatial=False)  # (B, 768)
+
+        # CNN 提取局部空间特征（return_spatial=True）
         palm_local = cnn_palm(palm_img, return_spatial=True)  # (B, 768, H, W)
         vein_local = cnn_vein(vein_img, return_spatial=True)  # (B, 768, H, W)
 
@@ -220,22 +223,26 @@ def plot_score_distribution(genuine_scores, impostor_scores, save_path):
 
 def main():
     print("=" * 70)
-    print("掌纹掌静脉融合识别 - 测试脚本")
+    print("掌纹掌静脉融合识别 - 测试脚本（Subject-Disjoint 设置）")
     print("=" * 70)
     print(f"Device: {config.device}")
     print(f"Checkpoint: {config.ckpt_path}")
+    print(f"Split: test (完全未见身份)")
     print("=" * 70)
 
     # 1. 加载模型
     print("\n[步骤 1/5] 加载模型...")
-    vit_palm, vit_vein, cnn_palm, cnn_vein, fusion_model = load_models(config)
+    cnn_palm, cnn_vein, fusion_model = load_models(config)
 
-    # 2. 加载测试数据
+    # 2. 加载测试数据（使用 subject-disjoint 划分）
     print("\n[步骤 2/5] 加载测试数据...")
-    test_dataset = PairDataset(
+    test_dataset = SubjectDisjointPairDataset(
         config.palm_dir, config.vein_dir,
         get_transforms(),
-        split='val'  # 使用验证集作为测试集
+        split='test',  # 使用测试集（完全未见身份）
+        train_ratio=config.train_ratio,
+        val_ratio=config.val_ratio,
+        seed=config.seed
     )
     test_loader = DataLoader(
         test_dataset,
@@ -243,7 +250,7 @@ def main():
         shuffle=False,
         num_workers=4
     )
-    print(f"✓ Test dataset size: {len(test_dataset)}")
+    print(f"✓ Test dataset: {test_dataset.num_classes} identities, {len(test_dataset)} samples")
 
     # 3. 提取特征
     print("\n[步骤 3/5] 提取特征向量...")
@@ -256,7 +263,7 @@ def main():
             vein = vein.to(config.device)
 
             features = extract_features(
-                vit_palm, vit_vein, cnn_palm, cnn_vein, fusion_model,
+                cnn_palm, cnn_vein, fusion_model,
                 palm, vein, config.device
             )
 
@@ -307,8 +314,13 @@ def main():
     # 输出结果
     # ============================================
     print("\n" + "=" * 70)
-    print("测试结果")
+    print("测试结果（Subject-Disjoint 开集识别）")
     print("=" * 70)
+    print(f"\n【测试设置】")
+    print(f"  测试集身份: {test_dataset.num_classes} 个（训练时完全未见）")
+    print(f"  测试样本数: {len(all_labels)}")
+    print(f"  Genuine 样本对: {len(genuine_scores)}")
+    print(f"  Impostor 样本对: {len(impostor_scores)}")
 
     print(f"\n【核心指标】")
     print(f"  EER (Equal Error Rate):        {eer:.4f} ({eer*100:.2f}%)")
@@ -327,6 +339,11 @@ def main():
         thr_str = f"{res['threshold']:.4f}" if np.isfinite(res['threshold']) else 'inf'
         print(f"{far:<12.5f} | {res['TAR']:<12.4f} | {thr_str:<12}")
 
+    print(f"\n【分数统计】")
+    print(f"  Genuine 均值: {np.mean(genuine_scores):.4f} ± {np.std(genuine_scores):.4f}")
+    print(f"  Impostor 均值: {np.mean(impostor_scores):.4f} ± {np.std(impostor_scores):.4f}")
+    print(f"  分数分离度: {np.mean(genuine_scores) - np.mean(impostor_scores):.4f}")
+
     # ============================================
     # 保存可视化结果
     # ============================================
@@ -340,12 +357,13 @@ def main():
     # 保存详细结果到文件
     # ============================================
     result_file = os.path.join(config.output_dir, 'test_results.txt')
-    with open(result_file, 'w') as f:
+    with open(result_file, 'w', encoding='utf-8') as f:
         f.write("=" * 70 + "\n")
-        f.write("掌纹掌静脉融合识别 - 测试结果\n")
+        f.write("掌纹掌静脉融合识别 - 测试结果（Subject-Disjoint 开集识别）\n")
         f.write("=" * 70 + "\n\n")
 
         f.write(f"Checkpoint: {config.ckpt_path}\n")
+        f.write(f"Test identities: {test_dataset.num_classes} (完全未见)\n")
         f.write(f"Test samples: {len(all_labels)}\n")
         f.write(f"Genuine pairs: {len(genuine_scores)}\n")
         f.write(f"Impostor pairs: {len(impostor_scores)}\n\n")
@@ -360,6 +378,13 @@ def main():
         for far, res in zip(target_fars, tar_results):
             thr_str = f"{res['threshold']:.4f}" if np.isfinite(res['threshold']) else 'inf'
             f.write(f"{far:<12.5f} | {res['TAR']:<12.4f} | {thr_str:<12}\n")
+
+        f.write("\n【分数统计】\n")
+        f.write(f"Genuine 均值: {np.mean(genuine_scores):.6f}\n")
+        f.write(f"Genuine 标准差: {np.std(genuine_scores):.6f}\n")
+        f.write(f"Impostor 均值: {np.mean(impostor_scores):.6f}\n")
+        f.write(f"Impostor 标准差: {np.std(impostor_scores):.6f}\n")
+        f.write(f"分数分离度: {np.mean(genuine_scores) - np.mean(impostor_scores):.6f}\n")
 
     print(f"\n✓ 详细结果已保存到: {result_file}")
 

@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from models.stage1 import ConvNeXt
 from models.stage2 import Stage2Fusion
-from utils.loss import get_stage1_loss, get_stage2_loss
+from utils.loss import ArcFaceCELoss
 from utils.custom_datasets import PolyUDataset, CASIADataset
 
 class Config:
@@ -56,7 +56,6 @@ class EarlyStopping:
 
         return self.should_stop
 
-
 def get_transforms(strong=True):
     base = [transforms.Resize((224, 224))]
     if strong:
@@ -72,7 +71,6 @@ def get_transforms(strong=True):
         ]
     base += [transforms.ToTensor(), transforms.Normalize(mean=[0.5], std=[0.5])]
     return transforms.Compose(base)
-
 
 def create_dataloaders(data_dir, split, batch_size, modality=None):
     if modality:  
@@ -106,121 +104,116 @@ def create_dataloaders(data_dir, split, batch_size, modality=None):
     ), dataset.num_classes
 
 def train_phase1(model, config, writer, model_name, modality):
-    print(f"开始训练 {model_name} ")
     data_dir = config.polyu_nir if modality == 'palm' else config.polyu_red
     train_loader, num_classes = create_dataloaders(data_dir, 'train', config.p1_batch, modality)
     val_loader, _ = create_dataloaders(data_dir, 'val', config.p1_batch, modality)
 
-    criterion = get_stage1_loss(
-        feat_dim=768, num_classes=num_classes, s=30.0, m_max=0.30,
-        lambda_center=0.005, lambda_margin=0.0005, margin=2.0,
-        warmup_epochs=30, center_start_epoch=5
+    criterion = ArcFaceCELoss(
+        feat_dim=768,
+        num_classes=num_classes,
+        s=30.0,
+        m=0.30,
+        warmup_epochs=30
     ).to(config.device)
 
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(criterion.parameters()),
-        lr=config.p1_lr, weight_decay=1e-5
+        lr=config.p1_lr,     
+        weight_decay=1e-5   
     )
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p1_epochs)
+
     early_stop = EarlyStopping(patience=config.p1_patience)
 
-    best_acc = 0.0
+    best_acc = 0.0 
 
     for epoch in range(config.p1_epochs):
-
         model.train()
         criterion.train()
         criterion.set_epoch(epoch)
 
-        train_loss, train_correct, train_total = 0, 0, 0
-        pbar = tqdm(train_loader, desc=f'[{model_name}] Epoch {epoch+1}/{config.p1_epochs}')
+        train_loss, train_correct, train_total = 0.0, 0, 0
 
-        for images, labels in pbar:
+        pbar = tqdm(total=len(train_loader), 
+                    desc=f'[{model_name}] Epoch {epoch+1}/{config.p1_epochs}',
+                    dynamic_ncols=True)
+
+        for images, labels in train_loader:
             images, labels = images.to(config.device), labels.to(config.device)
-
             features = model(images, return_spatial=False)
             loss, loss_dict = criterion(features, labels)
-
             optimizer.zero_grad()
             loss.backward()
+
             torch.nn.utils.clip_grad_norm_(
                 list(model.parameters()) + list(criterion.parameters()), max_norm=5.0
             )
             optimizer.step()
-
             train_loss += loss.item()
             train_correct += int(loss_dict['acc'] * labels.size(0))
             train_total += labels.size(0)
 
-            # 实时更新训练指标
-            current_train_loss = train_loss / (pbar.n + 1)
-            current_train_acc = 100. * train_correct / train_total
+            avg_train_loss = train_loss / len(train_loader)
+            avg_train_acc = 100. * train_correct / train_total
+
+            pbar.update(1)
             pbar.set_postfix({
-                'TrLoss': f"{current_train_loss:.4f}",
-                'TrAcc': f"{current_train_acc:.2f}%"
+                'TrLoss': f"{avg_train_loss:.4f}",
+                'TrAcc': f"{avg_train_acc:.2f}%",
+                'VaLoss': "------",
+                'VaAcc': "------"
             })
-
         scheduler.step()
-        train_loss /= len(train_loader)
-        train_acc = 100. * train_correct / train_total
 
-        # 验证
-        val_loss, val_acc = evaluate_phase1(model, criterion, val_loader, config.device)
+        model.eval()
+        criterion.eval()
+        val_total_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            val_steps = 0
+            for images, labels in val_loader:
+                images, labels = images.to(config.device), labels.to(config.device)
 
-        # 更新进度条以显示训练和验证指标
-        pbar.set_postfix({
-            'TrLoss': f"{train_loss:.4f}",
-            'TrAcc': f"{train_acc:.2f}%",
-            'VaLoss': f"{val_loss:.4f}",
-            'VaAcc': f"{val_acc:.2f}%"
-        })
-        pbar.refresh()  # 强制刷新显示
+                features = model(images, return_spatial=False)
+                loss, loss_dict = criterion(features, labels)
+
+                val_total_loss += loss.item()               
+                val_correct += int(loss_dict['acc'] * labels.size(0))
+                val_total += labels.size(0)
+                val_steps += 1
+                avg_val_loss = val_total_loss / val_steps
+                avg_val_acc = 100. * val_correct / val_total
+
+                pbar.update(1)
+                pbar.set_postfix({
+                    'TrLoss': f"{avg_train_loss:.4f}",
+                    'TrAcc': f"{avg_train_acc:.2f}%",
+                    'VaLoss': f"{avg_val_loss:.4f}",
+                    'VaAcc': f"{avg_val_acc:.2f}%"
+                     })
         pbar.close()
 
-        # TensorBoard 记录
         if writer:
-            writer.add_scalar(f'Phase1_{model_name}/TrainLoss', train_loss, epoch)
-            writer.add_scalar(f'Phase1_{model_name}/TrainAcc', train_acc, epoch)
-            writer.add_scalar(f'Phase1_{model_name}/ValLoss', val_loss, epoch)
-            writer.add_scalar(f'Phase1_{model_name}/ValAcc', val_acc, epoch)
+            writer.add_scalar(f'Phase1_{model_name}/TrainLoss', avg_train_loss, epoch)
+            writer.add_scalar(f'Phase1_{model_name}/TrainAcc', avg_train_acc, epoch)
+            writer.add_scalar(f'Phase1_{model_name}/ValLoss', avg_val_loss, epoch)
+            writer.add_scalar(f'Phase1_{model_name}/ValAcc', avg_val_acc, epoch)
 
-        # 保存最佳模型
-        if val_acc > best_acc:
-            best_acc = val_acc
+        if avg_val_acc > best_acc:
+            best_acc = avg_val_acc
             torch.save({
-                'model': model.state_dict(),
-                'criterion': criterion.state_dict(),
-                'epoch': epoch + 1,
-                'val_acc': val_acc
+                'model': model.state_dict(),          
+                'criterion': criterion.state_dict(),  
+                'epoch': epoch + 1,                   
+                'val_acc': avg_val_acc                   
             }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
 
-        if early_stop(-val_acc, mode='min'):
-            print(f"\n✓ Early stopping at epoch {epoch+1}")
+        if early_stop(-avg_val_acc, mode='min'):
+            print(f"Early stopping at epoch {epoch+1}")
             break
-
+        
     return best_acc
 
-
-def evaluate_phase1(model, criterion, loader, device):
-    model.eval()
-    criterion.eval()
-
-    total_loss, correct, total = 0, 0, 0
-
-    with torch.no_grad():
-        for images, labels in loader:
-            images, labels = images.to(device), labels.to(device)
-            features = model(images, return_spatial=False)
-            loss, loss_dict = criterion(features, labels)
-
-            total_loss += loss.item()
-            correct += int(loss_dict['acc'] * labels.size(0))
-            total += labels.size(0)
-
-    return total_loss / len(loader), 100. * correct / total
-
-
-# ===================== Stage 2: 融合训练 =====================
 def train_phase2(cnn_palm, cnn_vein, config, writer):
     for model, name in [(cnn_palm, 'cnn_palm'), (cnn_vein, 'cnn_vein')]:
         ckpt_path = os.path.join(config.save_dir, f'{name}_phase1_best.pth')
@@ -236,10 +229,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
     fusion_model = Stage2Fusion(
         in_dim_global_palm=768, in_dim_global_vein=768,
         in_dim_local_palm=768, in_dim_local_vein=768,
-        out_dim_local=256, use_spatial_fusion=True, final_l2norm=True,
-        with_arcface=True, num_classes=num_classes,
-        arcface_s=30.0, arcface_m=0.20
-    ).to(config.device)
+        out_dim_local=256, final_l2norm=True,
+        ).to(config.device)
 
     optimizer = torch.optim.Adam([
         {'params': fusion_model.parameters(), 'lr': config.p2_lr},
@@ -248,10 +239,15 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
     ], weight_decay=1e-2)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
-    criterion = get_stage2_loss(
-        num_classes=num_classes, feat_dim=512,
-        lambda_balance=0.1, lambda_diversity=0.05, mode='standard'
+
+    criterion = ArcFaceCELoss(
+        feat_dim=512,
+        num_classes=num_classes,
+        s=30.0,
+        m=0.20,
+        warmup_epochs=0
     ).to(config.device)
+
     early_stop = EarlyStopping(patience=config.p2_patience)
 
     best_acc = 0.0
@@ -261,10 +257,13 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
         cnn_vein.train()
         fusion_model.train()
 
-        train_loss, train_correct, train_total = 0, 0, 0
-        pbar = tqdm(train_loader, desc=f'[Stage2] Epoch {epoch+1}/{config.p2_epochs}')
+        train_loss, train_correct, train_total = 0.0, 0, 0
+        pbar = tqdm(train_loader, 
+                    desc=f'[Stage2] Epoch {epoch+1}/{config.p2_epochs}',
+                    dynamic_ncols=True,                    
+                    )
 
-        for palm_img, vein_img, labels in pbar:
+        for palm_img, vein_img, labels in train_loader:
             palm_img = palm_img.to(config.device)
             vein_img = vein_img.to(config.device)
             labels = labels.to(config.device)
@@ -274,17 +273,20 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
             palm_local = cnn_palm(palm_img, return_spatial=True)
             vein_local = cnn_vein(vein_img, return_spatial=True)
 
-            logits, fused_feat, details = fusion_model(
-                palm_global, vein_global, palm_local, vein_local, labels
+            fused_feat = fusion_model(
+                palm_global, vein_global, palm_local, vein_local
             )
 
-            loss, _ = criterion(logits, labels, fused_feat, details)
-
+            loss,loss_dict = criterion(fused_feat, labels)
+            logits = loss_dict['logits']
             optimizer.zero_grad()
+
             loss.backward()
+
             torch.nn.utils.clip_grad_norm_(cnn_palm.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(cnn_vein.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(fusion_model.parameters(), 1.0)
+
             optimizer.step()
 
             train_loss += loss.item()
@@ -292,43 +294,64 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
             train_correct += (pred == labels).sum().item()
             train_total += labels.size(0)
 
-            # 实时更新训练指标
-            current_train_loss = train_loss / (pbar.n + 1)
-            current_train_acc = 100. * train_correct / train_total
+            avg_train_loss = train_loss / len(train_loader)
+            avg_train_acc = 100. * train_correct / train_total
+
+            pbar.update(1)
             pbar.set_postfix({
-                'TrLoss': f"{current_train_loss:.4f}",
-                'TrAcc': f"{current_train_acc:.2f}%"
+                'TrLoss': f"{avg_train_loss:.4f}",
+                'TrAcc': f"{avg_train_acc:.2f}%",
+                'VaLoss': "------",
+                'VaAcc': "------"
             })
-
         scheduler.step()
-        train_loss /= len(train_loader)
-        train_acc = 100. * train_correct / train_total
 
-        # 验证
-        val_loss, val_acc = evaluate_phase2(
-            cnn_palm, cnn_vein, fusion_model, val_loader, config.device
-        )
+        cnn_palm.eval()
+        cnn_vein.eval()
+        fusion_model.eval()
+        val_total_loss, val_correct, val_total = 0.0, 0, 0  
+        with torch.no_grad():
+            val_steps = 0
+            for palm_img, vein_img, labels in val_loader:
+                palm_img = palm_img.to(config.device)
+                vein_img = vein_img.to(config.device)
+                labels = labels.to(config.device)
 
-        # 更新进度条以显示训练和验证指标
-        pbar.set_postfix({
-            'TrLoss': f"{train_loss:.4f}",
-            'TrAcc': f"{train_acc:.2f}%",
-            'VaLoss': f"{val_loss:.4f}",
-            'VaAcc': f"{val_acc:.2f}%"
-        })
-        pbar.refresh()  # 强制刷新显示
-        pbar.close()
+                palm_global = cnn_palm(palm_img, return_spatial=False)
+                vein_global = cnn_vein(vein_img, return_spatial=False)
+                palm_local = cnn_palm(palm_img, return_spatial=True)
+                vein_local = cnn_vein(vein_img, return_spatial=True)
 
-        # TensorBoard 记录
+                fused_feat = fusion_model(palm_global, vein_global, palm_local, vein_local)
+
+                loss,loss_dict = criterion(fused_feat, labels)
+                val_total_loss += loss.item()
+
+                _, pred = torch.max(loss_dict['logits'], 1)
+                val_correct += (pred == labels).sum().item()
+                val_total += labels.size(0)
+                val_steps += 1
+
+                avg_val_loss = val_total_loss / val_steps
+                avg_val_acc = 100. * val_correct / val_total
+
+                pbar.update(1)
+                pbar.set_postfix({
+                    'TrLoss': f"{avg_train_loss:.4f}",
+                    'TrAcc': f"{avg_train_acc:.2f}%",
+                    'VaLoss': f"{avg_val_loss:.4f}",
+                    'VaAcc': f"{avg_val_acc:.2f}%"
+                })
+            pbar.close()
+
         if writer:
-            writer.add_scalar('Phase2/TrainLoss', train_loss, epoch)
-            writer.add_scalar('Phase2/TrainAcc', train_acc, epoch)
-            writer.add_scalar('Phase2/ValLoss', val_loss, epoch)
-            writer.add_scalar('Phase2/ValAcc', val_acc, epoch)
+            writer.add_scalar('Phase2/TrainLoss', avg_train_loss, epoch)
+            writer.add_scalar('Phase2/TrainAcc', avg_train_acc, epoch)
+            writer.add_scalar('Phase2/ValLoss', avg_val_loss, epoch)
+            writer.add_scalar('Phase2/ValAcc', avg_val_acc, epoch)
 
-        # 保存最佳模型
-        if val_acc > best_acc:
-            best_acc = val_acc
+        if avg_val_acc > best_acc:
+            best_acc = avg_val_acc
             torch.save({
                 'epoch': epoch + 1,
                 'cnn_palm': cnn_palm.state_dict(),
@@ -337,46 +360,14 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
                 'best_acc': best_acc
             }, os.path.join(config.save_dir, 'stage2_best.pth'))
 
-        if early_stop(-val_acc, mode='min'):
-            print(f"\n✓ Early stopping at epoch {epoch+1}")
+        if early_stop(-avg_val_acc, mode='min'):
+            print(f"Early stopping at epoch {epoch+1}")
             break
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     return best_acc
-
-
-def evaluate_phase2(cnn_palm, cnn_vein, fusion_model, loader, device):
-    cnn_palm.eval()
-    cnn_vein.eval()
-    fusion_model.eval()
-
-    total_loss, correct, total = 0, 0, 0
-
-    with torch.no_grad():
-        for palm_img, vein_img, labels in loader:
-            palm_img = palm_img.to(device)
-            vein_img = vein_img.to(device)
-            labels = labels.to(device)
-
-            palm_global = cnn_palm(palm_img, return_spatial=False)
-            vein_global = cnn_vein(vein_img, return_spatial=False)
-            palm_local = cnn_palm(palm_img, return_spatial=True)
-            vein_local = cnn_vein(vein_img, return_spatial=True)
-
-            logits, _, _ = fusion_model(
-                palm_global, vein_global, palm_local, vein_local, labels
-            )
-
-            loss = nn.functional.cross_entropy(logits, labels)
-            total_loss += loss.item()
-
-            _, pred = torch.max(logits, 1)
-            correct += (pred == labels).sum().item()
-            total += labels.size(0)
-
-    return total_loss / len(loader), 100. * correct / total
 
 def main():
     writer = SummaryWriter(log_dir='outputs/runs/palm_vein_fusion')
@@ -394,7 +385,7 @@ def main():
         print(f" Vein(Best Acc: {vein_acc:.2f}%)")
 
     best_acc = train_phase2(cnn_palm, cnn_vein, config, writer)
-    print(f" 训练完成! best_val_acc: {best_acc:.2f}%")
+    print(f" best_val_acc: {best_acc:.2f}%")
 
     writer.close()
     

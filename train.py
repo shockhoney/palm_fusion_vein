@@ -104,6 +104,7 @@ def create_dataloaders(data_dir, split, batch_size, modality=None):
     ), dataset.num_classes
 
 def train_phase1(model, config, writer, model_name, modality):
+
     data_dir = config.polyu_nir if modality == 'palm' else config.polyu_red
     train_loader, num_classes = create_dataloaders(data_dir, 'train', config.p1_batch, modality)
     val_loader, _ = create_dataloaders(data_dir, 'val', config.p1_batch, modality)
@@ -119,12 +120,12 @@ def train_phase1(model, config, writer, model_name, modality):
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(criterion.parameters()),
         lr=config.p1_lr,     
-        weight_decay=1e-5   
+        weight_decay=5e-4   
     )
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p1_epochs)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[int(0.5 * config.p1_epochs), int(0.75 * config.p1_epochs)], gamma=0.1)
 
-    early_stop = EarlyStopping(patience=config.p1_patience)
+    # early_stop = EarlyStopping(patience=config.p1_patience)
 
     best_acc = 0.0 
 
@@ -208,9 +209,9 @@ def train_phase1(model, config, writer, model_name, modality):
                 'val_acc': avg_val_acc                   
             }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
 
-        if early_stop(-avg_val_acc, mode='min'):
-            print(f"Early stopping at epoch {epoch+1}")
-            break
+        # if early_stop(-avg_val_acc, mode='min'):
+        #     print(f"Early stopping at epoch {epoch+1}")
+        #     break
         
     return best_acc
 
@@ -248,7 +249,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
         warmup_epochs=0
     ).to(config.device)
 
-    early_stop = EarlyStopping(patience=config.p2_patience)
+    # early_stop = EarlyStopping(patience=config.p2_patience)
 
     best_acc = 0.0
  
@@ -360,9 +361,9 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
                 'best_acc': best_acc
             }, os.path.join(config.save_dir, 'stage2_best.pth'))
 
-        if early_stop(-avg_val_acc, mode='min'):
-            print(f"Early stopping at epoch {epoch+1}")
-            break
+        # if early_stop(-avg_val_acc, mode='min'):
+        #     print(f"Early stopping at epoch {epoch+1}")
+        #     break
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -370,7 +371,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
     return best_acc
 
 def main():
-    writer = SummaryWriter(log_dir='outputs/runs/palm_vein_fusion')
+    writer = SummaryWriter(log_dir='runs')
 
     cnn_palm = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
     cnn_vein = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)

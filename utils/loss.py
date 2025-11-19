@@ -13,11 +13,6 @@ class ArcFaceHead(nn.Module):
         self.weight = nn.Parameter(torch.randn(num_classes, in_features))
         nn.init.xavier_uniform_(self.weight)
 
-        self.cos_m = math.cos(m)
-        self.sin_m = math.sin(m)
-        self.th = math.cos(math.pi - m)
-        self.mm = math.sin(math.pi - m) * m
-
     def forward(self, x: torch.Tensor, labels: torch.Tensor, m_eff: float = None) -> torch.Tensor:
         if m_eff is None:
             m_eff = self.m

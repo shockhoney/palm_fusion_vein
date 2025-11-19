@@ -31,42 +31,42 @@ class Config:
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
 
-class EarlyStopping:
-    def __init__(self, patience=10, min_delta=0.001):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_value = None
-        self.should_stop = False
+# class EarlyStopping:
+#     def __init__(self, patience=10, min_delta=0.001):
+#         self.patience = patience
+#         self.min_delta = min_delta
+#         self.counter = 0
+#         self.best_value = None
+#         self.should_stop = False
 
-    def __call__(self, current_value, mode='min'):
-        if self.best_value is None:
-            self.best_value = current_value
-            return False
+#     def __call__(self, current_value, mode='min'):
+#         if self.best_value is None:
+#             self.best_value = current_value
+#             return False
 
-        improved = (current_value < self.best_value - self.min_delta) if mode == 'min' else \
-                   (current_value > self.best_value + self.min_delta)
+#         improved = (current_value < self.best_value - self.min_delta) if mode == 'min' else \
+#                    (current_value > self.best_value + self.min_delta)
 
-        if improved:
-            self.best_value = current_value
-            self.counter = 0
-        else:
-            self.counter += 1
-            self.should_stop = self.counter >= self.patience
+#         if improved:
+#             self.best_value = current_value
+#             self.counter = 0
+#         else:
+#             self.counter += 1
+#             self.should_stop = self.counter >= self.patience
 
-        return self.should_stop
+#         return self.should_stop
 
 def get_transforms(strong=True):
     base = [transforms.Resize((224, 224))]
     if strong:
         base += [
-            transforms.RandomRotation(15),
+            transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3)
+            transforms.ColorJitter(brightness=0.2, contrast=0.2)  # Reduced from 0.5 to 0.2
         ]
     else:
         base += [
-            transforms.RandomRotation(10),
+            transforms.RandomRotation(5),
             transforms.RandomAffine(0, translate=(0.05, 0.05))
         ]
     base += [transforms.ToTensor(), transforms.Normalize(mean=[0.5], std=[0.5])]
@@ -119,8 +119,8 @@ def train_phase1(model, config, writer, model_name, modality):
 
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(criterion.parameters()),
-        lr=config.p1_lr,     
-        weight_decay=5e-4   
+        lr=config.p1_lr,
+        weight_decay=1e-4   
     )
 
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[int(0.5 * config.p1_epochs), int(0.75 * config.p1_epochs)], gamma=0.1)
@@ -154,17 +154,11 @@ def train_phase1(model, config, writer, model_name, modality):
             train_loss += loss.item()
             train_correct += int(loss_dict['acc'] * labels.size(0))
             train_total += labels.size(0)
-
-            avg_train_loss = train_loss / len(train_loader)
-            avg_train_acc = 100. * train_correct / train_total
-
             pbar.update(1)
-            pbar.set_postfix({
-                'TrLoss': f"{avg_train_loss:.4f}",
-                'TrAcc': f"{avg_train_acc:.2f}%",
-                'VaLoss': "------",
-                'VaAcc': "------"
-            })
+
+        avg_train_loss = train_loss / len(train_loader)
+        avg_train_acc = 100. * train_correct / train_total
+
         scheduler.step()
 
         model.eval()
@@ -178,20 +172,20 @@ def train_phase1(model, config, writer, model_name, modality):
                 features = model(images, return_spatial=False)
                 loss, loss_dict = criterion(features, labels)
 
-                val_total_loss += loss.item()               
+                val_total_loss += loss.item()
                 val_correct += int(loss_dict['acc'] * labels.size(0))
                 val_total += labels.size(0)
                 val_steps += 1
-                avg_val_loss = val_total_loss / val_steps
-                avg_val_acc = 100. * val_correct / val_total
 
-                pbar.update(1)
-                pbar.set_postfix({
-                    'TrLoss': f"{avg_train_loss:.4f}",
-                    'TrAcc': f"{avg_train_acc:.2f}%",
-                    'VaLoss': f"{avg_val_loss:.4f}",
-                    'VaAcc': f"{avg_val_acc:.2f}%"
-                     })
+            avg_val_loss = val_total_loss / val_steps
+            avg_val_acc = 100. * val_correct / val_total
+
+            pbar.set_postfix({
+                'TrLoss': f"{avg_train_loss:.4f}",
+                'TrAcc': f"{avg_train_acc:.2f}%",
+                'VaLoss': f"{avg_val_loss:.4f}",
+                'VaAcc': f"{avg_val_acc:.2f}%"
+                 })
         pbar.close()
 
         if writer:
@@ -216,6 +210,7 @@ def train_phase1(model, config, writer, model_name, modality):
     return best_acc
 
 def train_phase2(cnn_palm, cnn_vein, config, writer):
+
     for model, name in [(cnn_palm, 'cnn_palm'), (cnn_vein, 'cnn_vein')]:
         ckpt_path = os.path.join(config.save_dir, f'{name}_phase1_best.pth')
         if os.path.exists(ckpt_path):
@@ -237,7 +232,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
         {'params': fusion_model.parameters(), 'lr': config.p2_lr},
         {'params': cnn_palm.parameters(), 'lr': config.p2_enc_lr},
         {'params': cnn_vein.parameters(), 'lr': config.p2_enc_lr}
-    ], weight_decay=1e-2)
+    ], weight_decay=1e-4)  # Reduced from 1e-2 to 1e-4
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
@@ -259,10 +254,10 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
         fusion_model.train()
 
         train_loss, train_correct, train_total = 0.0, 0, 0
-        pbar = tqdm(train_loader, 
+
+        pbar = tqdm(total=len(train_loader),
                     desc=f'[Stage2] Epoch {epoch+1}/{config.p2_epochs}',
-                    dynamic_ncols=True,                    
-                    )
+                    dynamic_ncols=True)
 
         for palm_img, vein_img, labels in train_loader:
             palm_img = palm_img.to(config.device)
@@ -294,17 +289,11 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
             _, pred = torch.max(logits, 1)
             train_correct += (pred == labels).sum().item()
             train_total += labels.size(0)
-
-            avg_train_loss = train_loss / len(train_loader)
-            avg_train_acc = 100. * train_correct / train_total
-
             pbar.update(1)
-            pbar.set_postfix({
-                'TrLoss': f"{avg_train_loss:.4f}",
-                'TrAcc': f"{avg_train_acc:.2f}%",
-                'VaLoss': "------",
-                'VaAcc': "------"
-            })
+
+        avg_train_loss = train_loss / len(train_loader)
+        avg_train_acc = 100. * train_correct / train_total
+
         scheduler.step()
 
         cnn_palm.eval()
@@ -333,17 +322,16 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
                 val_total += labels.size(0)
                 val_steps += 1
 
-                avg_val_loss = val_total_loss / val_steps
-                avg_val_acc = 100. * val_correct / val_total
+            avg_val_loss = val_total_loss / val_steps
+            avg_val_acc = 100. * val_correct / val_total
 
-                pbar.update(1)
-                pbar.set_postfix({
-                    'TrLoss': f"{avg_train_loss:.4f}",
-                    'TrAcc': f"{avg_train_acc:.2f}%",
-                    'VaLoss': f"{avg_val_loss:.4f}",
-                    'VaAcc': f"{avg_val_acc:.2f}%"
-                })
-            pbar.close()
+            pbar.set_postfix({
+                'TrLoss': f"{avg_train_loss:.4f}",
+                'TrAcc': f"{avg_train_acc:.2f}%",
+                'VaLoss': f"{avg_val_loss:.4f}",
+                'VaAcc': f"{avg_val_acc:.2f}%"
+            })
+        pbar.close()
 
         if writer:
             writer.add_scalar('Phase2/TrainLoss', avg_train_loss, epoch)

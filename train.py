@@ -206,7 +206,7 @@ def train_phase1(model, config, writer, model_name, modality):
         # if early_stop(-avg_val_acc, mode='min'):
         #     print(f"Early stopping at epoch {epoch+1}")
         #     break
-        
+         
     return best_acc
 
 def train_phase2(cnn_palm, cnn_vein, config, writer):

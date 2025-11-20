@@ -125,7 +125,7 @@ def build_backbone(name):
 
 def train_phase1(model, config, writer, model_name, modality, feat_dim):
 
-    data_dir = config.polyu_nir if modality == 'palm' else config.polyu_red
+    data_dir = config.polyu_red if modality == 'palm' else config.polyu_nir
     train_loader, num_classes = create_dataloaders(data_dir, 'train', config.p1_batch, modality)
     val_loader, _ = create_dataloaders(data_dir, 'val', config.p1_batch, modality)
 

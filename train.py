@@ -9,13 +9,19 @@ import torchvision.transforms as transforms
 from tqdm import tqdm
 
 from models.stage1 import ConvNeXt
+from models.stage1_mobilenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
-from utils.loss import ArcFaceCELoss
-from utils.custom_datasets import PolyUDataset, CASIADataset
+from utils.head import ArcNet
+from utils.datasets import PolyUDataset, CASIADataset
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     save_dir = 'outputs/models'
+    backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
+
+    input_size = 224
+    num_workers = 4
+
     polyu_nir = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\PolyU\\NIR'
     polyu_red = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\PolyU\\Red'
     casia_vi = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\CASIA_dataset\\vi'
@@ -23,41 +29,40 @@ class Config:
 
     p1_epochs, p1_batch, p1_lr = 150, 32, 1e-4
     p1_patience = 20
-    p1_train_ratio, p1_val_ratio = 0.8, 0.1
-
+    train_ratio, val_ratio = 0.8, 0.1
     p2_epochs, p2_batch, p2_lr, p2_enc_lr = 50, 16, 1e-4, 1e-5
     p2_patience = 10
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
 
-# class EarlyStopping:
-#     def __init__(self, patience=10, min_delta=0.001):
-#         self.patience = patience
-#         self.min_delta = min_delta
-#         self.counter = 0
-#         self.best_value = None
-#         self.should_stop = False
+class EarlyStopping:
+    def __init__(self, patience=10, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_value = None
+        self.should_stop = False
 
-#     def __call__(self, current_value, mode='min'):
-#         if self.best_value is None:
-#             self.best_value = current_value
-#             return False
+    def __call__(self, current_value, mode='min'):
+        if self.best_value is None:
+            self.best_value = current_value
+            return False
 
-#         improved = (current_value < self.best_value - self.min_delta) if mode == 'min' else \
-#                    (current_value > self.best_value + self.min_delta)
+        improved = (current_value < self.best_value - self.min_delta) if mode == 'min' else \
+                   (current_value > self.best_value + self.min_delta)
 
-#         if improved:
-#             self.best_value = current_value
-#             self.counter = 0
-#         else:
-#             self.counter += 1
-#             self.should_stop = self.counter >= self.patience
+        if improved:
+            self.best_value = current_value
+            self.counter = 0
+        else:
+            self.counter += 1
+            self.should_stop = self.counter >= self.patience
 
-#         return self.should_stop
+        return self.should_stop
 
-def get_transforms(strong=True):
-    base = [transforms.Resize((224, 224))]
+def get_transforms(img_size, strong=True):
+    base = [transforms.Resize((img_size, img_size))]
     if strong:
         base += [
             transforms.RandomRotation(10),
@@ -77,9 +82,9 @@ def create_dataloaders(data_dir, split, batch_size, modality=None):
         dataset = PolyUDataset(
             data_dir=data_dir,
             split=split,
-            transform=get_transforms(strong=(split == 'train')),
-            train_ratio=config.p1_train_ratio,
-            val_ratio=config.p1_val_ratio,
+            transform=get_transforms(config.input_size, strong=(split == 'train')),
+            train_ratio=config.train_ratio,
+            val_ratio=config.val_ratio,
             seed=42
         )
     else: 
@@ -87,10 +92,10 @@ def create_dataloaders(data_dir, split, batch_size, modality=None):
             palm_dir=config.casia_vi,
             vein_dir=config.casia_ir,
             split=split,
-            transform_palm=get_transforms(strong=(split == 'train')),
-            transform_vein=get_transforms(strong=(split == 'train')),
-            train_ratio=0.8,
-            val_ratio=0.1,
+            transform_palm=get_transforms(config.input_size, strong=(split == 'train')),
+            transform_vein=get_transforms(config.input_size, strong=(split == 'train')),
+            train_ratio=config.train_ratio,
+            val_ratio=config.val_ratio,
             seed=42
         )
 
@@ -98,24 +103,40 @@ def create_dataloaders(data_dir, split, batch_size, modality=None):
         dataset,
         batch_size=batch_size,
         shuffle=(split == 'train'),
-        num_workers=4,
+        num_workers=config.num_workers,
         pin_memory=True,
         drop_last=(split == 'train')
     ), dataset.num_classes
 
-def train_phase1(model, config, writer, model_name, modality):
+def build_backbone(name):
+    name = name.lower()
+    if name == 'convnext':
+        model = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
+        feat_dim = model.out_dim
+        local_dim = model.local_dim
+    elif name in ('mobilefacenet', 'mobile'):
+        model = MobileFaceNet(input_channel=1, input_size=config.input_size).to(config.device)
+        feat_dim = model.out_dim
+        local_dim = model.local_dim
+    else:
+        raise ValueError(f"Unsupported backbone: {name}")
+    return model, feat_dim, local_dim
+
+
+def train_phase1(model, config, writer, model_name, modality, feat_dim):
 
     data_dir = config.polyu_nir if modality == 'palm' else config.polyu_red
     train_loader, num_classes = create_dataloaders(data_dir, 'train', config.p1_batch, modality)
     val_loader, _ = create_dataloaders(data_dir, 'val', config.p1_batch, modality)
 
-    criterion = ArcFaceCELoss(
-        feat_dim=768,
-        num_classes=num_classes,
-        s=30.0,
-        m=0.30,
-        warmup_epochs=30
+    criterion = ArcNet(
+        feature_dim=feat_dim,
+        class_dim=num_classes,
+        margin=0.20,
+        scale=30.0,
     ).to(config.device)
+
+    ce_loss = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(criterion.parameters()),
@@ -123,7 +144,9 @@ def train_phase1(model, config, writer, model_name, modality):
         weight_decay=1e-4   
     )
 
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[int(0.5 * config.p1_epochs), int(0.75 * config.p1_epochs)], gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
+                                milestones=[int(0.5 * config.p1_epochs), 
+                            int(0.75 * config.p1_epochs)], gamma=0.1)
 
     # early_stop = EarlyStopping(patience=config.p1_patience)
 
@@ -132,7 +155,6 @@ def train_phase1(model, config, writer, model_name, modality):
     for epoch in range(config.p1_epochs):
         model.train()
         criterion.train()
-        criterion.set_epoch(epoch)
 
         train_loss, train_correct, train_total = 0.0, 0, 0
 
@@ -143,7 +165,8 @@ def train_phase1(model, config, writer, model_name, modality):
         for images, labels in train_loader:
             images, labels = images.to(config.device), labels.to(config.device)
             features = model(images, return_spatial=False)
-            loss, loss_dict = criterion(features, labels)
+            logits = criterion(features, labels)
+            loss = ce_loss(logits, labels)
             optimizer.zero_grad()
             loss.backward()
 
@@ -152,7 +175,8 @@ def train_phase1(model, config, writer, model_name, modality):
             )
             optimizer.step()
             train_loss += loss.item()
-            train_correct += int(loss_dict['acc'] * labels.size(0))
+            preds = logits.argmax(dim=1)
+            train_correct += (preds == labels).sum().item()
             train_total += labels.size(0)
             pbar.update(1)
 
@@ -170,10 +194,11 @@ def train_phase1(model, config, writer, model_name, modality):
                 images, labels = images.to(config.device), labels.to(config.device)
 
                 features = model(images, return_spatial=False)
-                loss, loss_dict = criterion(features, labels)
-
+                logits = criterion(features, labels)
+                loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
-                val_correct += int(loss_dict['acc'] * labels.size(0))
+                preds = logits.argmax(dim=1)
+                val_correct += (preds == labels).sum().item()
                 val_total += labels.size(0)
                 val_steps += 1
 
@@ -209,7 +234,7 @@ def train_phase1(model, config, writer, model_name, modality):
          
     return best_acc
 
-def train_phase2(cnn_palm, cnn_vein, config, writer):
+def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
     for model, name in [(cnn_palm, 'cnn_palm'), (cnn_vein, 'cnn_vein')]:
         ckpt_path = os.path.join(config.save_dir, f'{name}_phase1_best.pth')
@@ -222,10 +247,11 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
     train_loader, num_classes = create_dataloaders(None, 'train', config.p2_batch)
     val_loader, _ = create_dataloaders(None, 'val', config.p2_batch)
 
+    out_dim_local = min(256, local_dim)
     fusion_model = Stage2Fusion(
-        in_dim_global_palm=768, in_dim_global_vein=768,
-        in_dim_local_palm=768, in_dim_local_vein=768,
-        out_dim_local=256, final_l2norm=True,
+        in_dim_global_palm=feat_dim, in_dim_global_vein=feat_dim,
+        in_dim_local_palm=local_dim, in_dim_local_vein=local_dim,
+        out_dim_local=out_dim_local, final_l2norm=True,
         ).to(config.device)
 
     optimizer = torch.optim.Adam([
@@ -236,13 +262,13 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
-    criterion = ArcFaceCELoss(
-        feat_dim=512,
-        num_classes=num_classes,
-        s=30.0,
-        m=0.20,
-        warmup_epochs=0
+    criterion = ArcNet(
+        feature_dim=feat_dim,
+        class_dim=num_classes,
+        margin=0.20,
+        scale=30.0,
     ).to(config.device)
+    ce_loss = nn.CrossEntropyLoss()
 
     # early_stop = EarlyStopping(patience=config.p2_patience)
 
@@ -273,8 +299,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
                 palm_global, vein_global, palm_local, vein_local
             )
 
-            loss,loss_dict = criterion(fused_feat, labels)
-            logits = loss_dict['logits']
+            logits = criterion(fused_feat, labels)
+            loss = ce_loss(logits, labels)
             optimizer.zero_grad()
 
             loss.backward()
@@ -314,10 +340,10 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
 
                 fused_feat = fusion_model(palm_global, vein_global, palm_local, vein_local)
 
-                loss,loss_dict = criterion(fused_feat, labels)
+                logits = criterion(fused_feat, labels)
                 val_total_loss += loss.item()
 
-                _, pred = torch.max(loss_dict['logits'], 1)
+                _, pred = torch.max(logits, 1)
                 val_correct += (pred == labels).sum().item()
                 val_total += labels.size(0)
                 val_steps += 1
@@ -361,19 +387,19 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
 def main():
     writer = SummaryWriter(log_dir='runs')
 
-    cnn_palm = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
-    cnn_vein = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
+    cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
+    cnn_vein, _, _ = build_backbone(config.backbone)
 
     skip_stage1 = False  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
-        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', 'palm')
+        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', 'palm', feat_dim)
         print(f" Palm(Best Acc: {palm_acc:.2f}%)")
 
-        vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', 'vein')
+        vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', 'vein', feat_dim)
         print(f" Vein(Best Acc: {vein_acc:.2f}%)")
 
-    best_acc = train_phase2(cnn_palm, cnn_vein, config, writer)
+    best_acc = train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim)
     print(f" best_val_acc: {best_acc:.2f}%")
 
     writer.close()

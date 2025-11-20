@@ -1,8 +1,6 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.loss import ArcFaceHead
 
 class CrossModalAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 8):
@@ -72,7 +70,7 @@ class Stage2Fusion(nn.Module):
                  in_dim_local_vein: int = 768,
                  out_dim_local: int = 256,
                  final_l2norm: bool = True,
-                 out_dim_final: int = 512,   # 新增：最终输出维度（默认 512）
+                 out_dim_final: int = 512,  
                 ):
         super().__init__()
         self.final_l2norm = final_l2norm
@@ -81,11 +79,11 @@ class Stage2Fusion(nn.Module):
         assert in_dim_global_palm == in_dim_global_vein, "Global dims must match"
         global_dim = in_dim_global_palm
 
-        # 全局特征 cross-attn + channel-fusion
+
         self.global_cross_attn = CrossModalAttention(global_dim, num_heads=8)
         self.global_channel_fusion = ChannelAttentionFusion(global_dim, reduction=4)
 
-        # 局部特征对齐
+
         if in_dim_local_palm != out_dim_local:
             self.local_align_palm = nn.Linear(in_dim_local_palm, out_dim_local)
         else:
@@ -96,17 +94,17 @@ class Stage2Fusion(nn.Module):
         else:
             self.local_align_vein = nn.Identity()
 
-        # 局部特征 cross-attn + channel-fusion
+  
         self.local_cross_attn = CrossModalAttention(out_dim_local, num_heads=8)
         self.local_channel_fusion = ChannelAttentionFusion(out_dim_local, reduction=4)
 
-        # 融合后总维度（拼接后）
+
         self.concat_dim = global_dim + out_dim_local
 
-        # 新增：线性投影到最终维度（和 ArcFace 的 feat_dim 一致）
+
         self.proj = nn.Linear(self.concat_dim, out_dim_final)
 
-        # 暴露给外部看的最终维度
+
         self.final_dim = out_dim_final
 
     def forward(self,
@@ -116,13 +114,13 @@ class Stage2Fusion(nn.Module):
                 vein_local: torch.Tensor,
                ):
 
-        # 全局特征融合
+
         global_palm_enhanced, global_vein_enhanced = self.global_cross_attn(palm_global, vein_global)
         global_fused, global_w_palm, global_w_vein = self.global_channel_fusion(
             global_palm_enhanced, global_vein_enhanced
         )
 
-        # 处理局部特征维度
+
         if palm_local.dim() == 4:  # (N, C, H, W)
             palm_local = palm_local.mean(dim=[2, 3])  # (N, C)
         if vein_local.dim() == 4:  # (N, C, H, W)
@@ -131,7 +129,7 @@ class Stage2Fusion(nn.Module):
         palm_local_aligned = self.local_align_palm(palm_local)  # (N, out_dim_local)
         vein_local_aligned = self.local_align_vein(vein_local)  # (N, out_dim_local)
 
-        # 局部特征融合
+
         local_palm_enhanced, local_vein_enhanced = self.local_cross_attn(
             palm_local_aligned, vein_local_aligned
         )
@@ -139,11 +137,11 @@ class Stage2Fusion(nn.Module):
             local_palm_enhanced, local_vein_enhanced
         )
 
-        # 全局 + 局部 拼接
+ 
         fused_feat = torch.cat([global_fused, local_fused], dim=1)  # (N, concat_dim)
 
         # 线性压到 out_dim_final（默认 512）
-        fused_feat = self.proj(fused_feat)  # (N, out_dim_final)
+        fused_feat = self.proj(fused_feat)  
 
         if self.final_l2norm:
             fused_feat = F.normalize(fused_feat, dim=1)

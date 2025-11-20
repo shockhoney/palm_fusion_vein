@@ -1,10 +1,10 @@
 import os
 import numpy as np
+import zlib
 from PIL import Image
 from torch.utils.data import Dataset
 
 IMAGE_EXTS = ('.jpg', '.png', '.jpeg', '.bmp')
-
 
 def split_person_ids(all_pids, split, train_ratio=0.8, val_ratio=0.1, seed=42):
 
@@ -19,27 +19,44 @@ def split_person_ids(all_pids, split, train_ratio=0.8, val_ratio=0.1, seed=42):
     return shuffled[start:end]
 
 
+def split_indices_by_ratio(num_items, split, train_ratio=0.8, val_ratio=0.1, seed=42):
+
+    rng = np.random.RandomState(seed)
+    order = rng.permutation(num_items)
+    train_end = int(num_items * train_ratio)
+    val_end = train_end + int(num_items * val_ratio)
+    ranges = {'train': (0, train_end), 'val': (train_end, val_end), 'test': (val_end, num_items)}
+    start, end = ranges.get(split, (val_end, num_items))
+    return order[start:end]
+
+def _seed_from_pid(pid: str, base_seed: int) -> int:
+    return base_seed + (zlib.crc32(pid.encode('utf-8')) % 10000)
+
+
 class PolyUDataset(Dataset):
 
     def __init__(self, data_dir, split, transform, train_ratio=0.8, val_ratio=0.1, seed=42):
-        # Get person IDs from directory structure
-        all_pids = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
-        split_pids = split_person_ids(all_pids, split, train_ratio, val_ratio, seed)
 
-        # Map PIDs to labels
-        pid_to_label = {pid: idx for idx, pid in enumerate(sorted(split_pids))}
+        self.all_pids = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
+        self.pid_to_label = {pid: idx for idx, pid in enumerate(self.all_pids)}
+        self.num_classes = len(self.all_pids)
 
-        # Collect all image samples
         self.samples = []
-        for pid in split_pids:
+        for pid in self.all_pids:
             person_dir = os.path.join(data_dir, pid)
             images = sorted([f for f in os.listdir(person_dir) if f.lower().endswith(IMAGE_EXTS)])
-            self.samples.extend([(os.path.join(person_dir, img), pid_to_label[pid]) for img in images])
+            if not images:
+                continue
+
+            pid_seed = _seed_from_pid(pid, seed)
+            idxs = split_indices_by_ratio(len(images), split, train_ratio, val_ratio, pid_seed)
+            for idx in idxs:
+                self.samples.append((os.path.join(person_dir, images[idx]), self.pid_to_label[pid]))
 
         self.transform = transform
-        self.num_classes = len(split_pids)
-        print(f"PolyUDataset ({split}): {len(split_pids)} PIDs, {len(self.samples)} samples, "
-              f"labels [{min(s[1] for s in self.samples)}-{max(s[1] for s in self.samples)}]")
+        label_range = (min(s[1] for s in self.samples), max(s[1] for s in self.samples)) if self.samples else (0, 0)
+        print(f"PolyUDataset ({split}): {len(self.all_pids)} PIDs, {len(self.samples)} samples, "
+              f"labels [{label_range[0]}-{label_range[1]}]")
 
     def __len__(self):
         return len(self.samples)
@@ -54,32 +71,34 @@ class CASIADataset(Dataset):
     
     def __init__(self, palm_dir, vein_dir, split, transform_palm, transform_vein,
                  train_ratio=0.8, val_ratio=0.1, seed=42):
-        # Scan both directories for images
         palm_dict = self._scan_dir(palm_dir)
         vein_dict = self._scan_dir(vein_dir)
 
-        # Find common person IDs
         all_pids = sorted(set(palm_dict.keys()) & set(vein_dict.keys()))
         if not all_pids:
             raise ValueError("No common person IDs found")
 
-        split_pids = split_person_ids(all_pids, split, train_ratio, val_ratio, seed)
-        pid_to_label = {pid: idx for idx, pid in enumerate(sorted(split_pids))}
+        pid_to_label = {pid: idx for idx, pid in enumerate(sorted(all_pids))}
 
-        # Pair palm and vein images
         self.palm_imgs, self.vein_imgs, self.labels = [], [], []
-        for pid in split_pids:
+        for pid in all_pids:
             n_pairs = min(len(palm_dict[pid]), len(vein_dict[pid]))
-            for i in range(n_pairs):
-                self.palm_imgs.append(palm_dict[pid][i])
-                self.vein_imgs.append(vein_dict[pid][i])
+            if n_pairs == 0:
+                continue
+            pid_seed = _seed_from_pid(pid, seed)
+            pair_order = split_indices_by_ratio(n_pairs, split, train_ratio, val_ratio, pid_seed)
+
+            for idx in pair_order:
+                self.palm_imgs.append(palm_dict[pid][idx])
+                self.vein_imgs.append(vein_dict[pid][idx])
                 self.labels.append(pid_to_label[pid])
 
         self.transform_palm = transform_palm
         self.transform_vein = transform_vein
-        self.num_classes = len(split_pids)
-        print(f"CASIADataset ({split}): {len(split_pids)} PIDs, {len(self.labels)} samples, "
-              f"labels [{min(self.labels)}-{max(self.labels)}]")
+        self.num_classes = len(all_pids)
+        label_range = (min(self.labels), max(self.labels)) if self.labels else (0, 0)
+        print(f"CASIADataset ({split}): {len(all_pids)} PIDs, {len(self.labels)} samples, "
+              f"labels [{label_range[0]}-{label_range[1]}]")
 
     @staticmethod
     def _scan_dir(directory):

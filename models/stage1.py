@@ -85,12 +85,14 @@ class ConvNeXt(nn.Module):
                 *[Block(dim=dims[i],
                         drop_path=dp_rates[cur + j],
                         layer_scale_init_value=layer_scale_init_value)
-                  for j in range(depths[i])]
+                for j in range(depths[i])]
             )
             self.stages.append(stage)
             cur += depths[i]
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6) 
+        self.out_dim = dims[-1]
+        self.local_dim = dims[-1]
         self.apply(self._init_weights)
 
     def _init_weights(self, m):

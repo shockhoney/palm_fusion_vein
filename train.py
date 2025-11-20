@@ -17,7 +17,7 @@ from utils.datasets import PolyUDataset, CASIADataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     save_dir = 'outputs/models'
-    backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
+    backbone = 'convnext'  # 'convnext' or 'mobilefacenet'
 
     input_size = 224
     num_workers = 4
@@ -67,7 +67,7 @@ def get_transforms(img_size, strong=True):
         base += [
             transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2)  # Reduced from 0.5 to 0.2
+            transforms.ColorJitter(brightness=0.2, contrast=0.2)  
         ]
     else:
         base += [
@@ -223,9 +223,7 @@ def train_phase1(model, config, writer, model_name, modality, feat_dim):
             best_acc = avg_val_acc
             torch.save({
                 'model': model.state_dict(),          
-                'criterion': criterion.state_dict(),  
-                'epoch': epoch + 1,                   
-                'val_acc': avg_val_acc                   
+                'criterion': criterion.state_dict()                  
             }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
 
         # if early_stop(-avg_val_acc, mode='min'):
@@ -341,6 +339,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 fused_feat = fusion_model(palm_global, vein_global, palm_local, vein_local)
 
                 logits = criterion(fused_feat, labels)
+                loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
 
                 _, pred = torch.max(logits, 1)
@@ -368,11 +367,9 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
             torch.save({
-                'epoch': epoch + 1,
                 'cnn_palm': cnn_palm.state_dict(),
                 'cnn_vein': cnn_vein.state_dict(),
                 'fusion': fusion_model.state_dict(),
-                'best_acc': best_acc
             }, os.path.join(config.save_dir, 'stage2_best.pth'))
 
         # if early_stop(-avg_val_acc, mode='min'):

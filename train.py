@@ -9,6 +9,7 @@ import torchvision.transforms as transforms
 from tqdm import tqdm
 
 from models.stage1 import ConvNeXt
+from models.stage1_mobilenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 from utils.loss import ArcFaceCELoss
 from utils.custom_datasets import PolyUDataset, CASIADataset
@@ -16,6 +17,8 @@ from utils.custom_datasets import PolyUDataset, CASIADataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     save_dir = 'outputs/models'
+    backbone = 'convnext'  # 'convnext' or 'mobilenet'
+    input_size = 224
     polyu_nir = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\PolyU\\NIR'
     polyu_red = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\PolyU\\Red'
     casia_vi = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\CASIA_dataset\\vi'
@@ -27,6 +30,7 @@ class Config:
 
     p2_epochs, p2_batch, p2_lr, p2_enc_lr = 50, 16, 1e-4, 1e-5
     p2_patience = 10
+    stage2_out_dim = 512
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
@@ -57,7 +61,7 @@ os.makedirs(config.save_dir, exist_ok=True)
 #         return self.should_stop
 
 def get_transforms(strong=True):
-    base = [transforms.Resize((224, 224))]
+    base = [transforms.Resize((config.input_size, config.input_size))]
     if strong:
         base += [
             transforms.RandomRotation(10),
@@ -103,14 +107,30 @@ def create_dataloaders(data_dir, split, batch_size, modality=None):
         drop_last=(split == 'train')
     ), dataset.num_classes
 
-def train_phase1(model, config, writer, model_name, modality):
+
+def build_backbone(config):
+    if config.backbone.lower() == 'mobilenet':
+        model = MobileFaceNet(
+            input_channel=1,
+            input_width=config.input_size,
+            input_height=config.input_size
+        )
+        feat_dim = 256
+        local_dim = 256
+    else:
+        model = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768])
+        feat_dim = 768
+        local_dim = 768
+    return model.to(config.device), feat_dim, local_dim
+
+def train_phase1(model, config, writer, model_name, modality, feat_dim):
 
     data_dir = config.polyu_nir if modality == 'palm' else config.polyu_red
     train_loader, num_classes = create_dataloaders(data_dir, 'train', config.p1_batch, modality)
     val_loader, _ = create_dataloaders(data_dir, 'val', config.p1_batch, modality)
 
     criterion = ArcFaceCELoss(
-        feat_dim=768,
+        feat_dim=feat_dim,
         num_classes=num_classes,
         s=30.0,
         m=0.30,
@@ -209,7 +229,7 @@ def train_phase1(model, config, writer, model_name, modality):
          
     return best_acc
 
-def train_phase2(cnn_palm, cnn_vein, config, writer):
+def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
     for model, name in [(cnn_palm, 'cnn_palm'), (cnn_vein, 'cnn_vein')]:
         ckpt_path = os.path.join(config.save_dir, f'{name}_phase1_best.pth')
@@ -223,9 +243,10 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
     val_loader, _ = create_dataloaders(None, 'val', config.p2_batch)
 
     fusion_model = Stage2Fusion(
-        in_dim_global_palm=768, in_dim_global_vein=768,
-        in_dim_local_palm=768, in_dim_local_vein=768,
-        out_dim_local=256, final_l2norm=True,
+        in_dim_global_palm=feat_dim, in_dim_global_vein=feat_dim,
+        in_dim_local_palm=local_dim, in_dim_local_vein=local_dim,
+        out_dim_local=min(local_dim, 256), final_l2norm=True,
+        out_dim_final=config.stage2_out_dim,
         ).to(config.device)
 
     optimizer = torch.optim.Adam([
@@ -237,7 +258,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
     criterion = ArcFaceCELoss(
-        feat_dim=512,
+        feat_dim=config.stage2_out_dim,
         num_classes=num_classes,
         s=30.0,
         m=0.20,
@@ -361,19 +382,24 @@ def train_phase2(cnn_palm, cnn_vein, config, writer):
 def main():
     writer = SummaryWriter(log_dir='runs')
 
-    cnn_palm = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
-    cnn_vein = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
+    cnn_palm, feat_dim_palm, local_dim_palm = build_backbone(config)
+    cnn_vein, feat_dim_vein, local_dim_vein = build_backbone(config)
+
+    assert feat_dim_palm == feat_dim_vein, "Palm/vein backbones must output the same global dim"
+    assert local_dim_palm == local_dim_vein, "Palm/vein backbones must output the same local dim"
+    feat_dim = feat_dim_palm
+    local_dim = local_dim_palm
 
     skip_stage1 = False  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
-        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', 'palm')
+        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', 'palm', feat_dim)
         print(f" Palm(Best Acc: {palm_acc:.2f}%)")
 
-        vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', 'vein')
+        vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', 'vein', feat_dim)
         print(f" Vein(Best Acc: {vein_acc:.2f}%)")
 
-    best_acc = train_phase2(cnn_palm, cnn_vein, config, writer)
+    best_acc = train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim)
     print(f" best_val_acc: {best_acc:.2f}%")
 
     writer.close()

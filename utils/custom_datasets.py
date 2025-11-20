@@ -26,10 +26,10 @@ class PolyUDataset(Dataset):
         all_pids = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
         split_pids = split_person_ids(all_pids, split, train_ratio, val_ratio, seed)
 
-        # Map PIDs to labels
-        pid_to_label = {pid: idx for idx, pid in enumerate(sorted(split_pids))}
+        # Map all PIDs to a **global** label space so train/val/test share the same classes
+        pid_to_label = {pid: idx for idx, pid in enumerate(sorted(all_pids))}
 
-        # Collect all image samples
+        # Collect all image samples for the requested split
         self.samples = []
         for pid in split_pids:
             person_dir = os.path.join(data_dir, pid)
@@ -37,8 +37,8 @@ class PolyUDataset(Dataset):
             self.samples.extend([(os.path.join(person_dir, img), pid_to_label[pid]) for img in images])
 
         self.transform = transform
-        self.num_classes = len(split_pids)
-        print(f"PolyUDataset ({split}): {len(split_pids)} PIDs, {len(self.samples)} samples, "
+        self.num_classes = len(all_pids)
+        print(f"PolyUDataset ({split}): {len(split_pids)} PIDs / {len(all_pids)} total, {len(self.samples)} samples, "
               f"labels [{min(s[1] for s in self.samples)}-{max(s[1] for s in self.samples)}]")
 
     def __len__(self):
@@ -64,7 +64,8 @@ class CASIADataset(Dataset):
             raise ValueError("No common person IDs found")
 
         split_pids = split_person_ids(all_pids, split, train_ratio, val_ratio, seed)
-        pid_to_label = {pid: idx for idx, pid in enumerate(sorted(split_pids))}
+        # Keep a global label mapping across splits so Stage 1/2 evaluate on the same IDs
+        pid_to_label = {pid: idx for idx, pid in enumerate(sorted(all_pids))}
 
         # Pair palm and vein images
         self.palm_imgs, self.vein_imgs, self.labels = [], [], []
@@ -77,8 +78,8 @@ class CASIADataset(Dataset):
 
         self.transform_palm = transform_palm
         self.transform_vein = transform_vein
-        self.num_classes = len(split_pids)
-        print(f"CASIADataset ({split}): {len(split_pids)} PIDs, {len(self.labels)} samples, "
+        self.num_classes = len(all_pids)
+        print(f"CASIADataset ({split}): {len(split_pids)} PIDs / {len(all_pids)} total, {len(self.labels)} samples, "
               f"labels [{min(self.labels)}-{max(self.labels)}]")
 
     @staticmethod

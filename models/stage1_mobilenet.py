@@ -69,7 +69,7 @@ class Residual(Module):
         return self.model(x)
 
 class MobileFaceNet(Module):
-    def __init__(self, input_channel=3, input_width=96, input_height=96):
+    def __init__(self, input_channel=1, input_width=224, input_height=224):
         super(MobileFaceNet, self).__init__()
         self.conv1 = ConvBlock(input_channel, 32, kernel=(3, 3), stride=(2, 2), padding=(1, 1))
         self.conv2_dw = ConvBlock(32, 32, kernel=(3, 3), stride=(1, 1), padding=(1, 1), groups=32)
@@ -84,7 +84,7 @@ class MobileFaceNet(Module):
 
         self.bn = BatchNorm1d(256)
 
-    def forward(self, x):
+    def forward(self, x, return_spatial=False):
         x = self.conv1(x)
         x = self.conv2_dw(x)
         x = self.conv_23(x)
@@ -93,9 +93,12 @@ class MobileFaceNet(Module):
         x = self.conv_4(x)
         x = self.conv_45(x)
         x = self.conv_5(x)
-        x = self.conv_6_sep(x)
-        x = self.conv_6_dw(x)
-        x = x.reshape(-1, 256)
-        x = self.bn(x)
+        spatial_feat = self.conv_6_sep(x)
+        global_feat = self.conv_6_dw(spatial_feat)
+        global_feat = global_feat.reshape(-1, 256)
+        global_feat = self.bn(global_feat)
 
-        return x
+        if return_spatial:
+            return spatial_feat
+
+        return global_feat

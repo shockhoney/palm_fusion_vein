@@ -6,19 +6,6 @@ from torch.utils.data import Dataset
 
 IMAGE_EXTS = ('.jpg', '.png', '.jpeg', '.bmp')
 
-def split_person_ids(all_pids, split, train_ratio=0.8, val_ratio=0.1, seed=42):
-
-    np.random.seed(seed)
-    shuffled = np.random.permutation(sorted(all_pids))
-    n = len(shuffled)
-    train_end = int(n * train_ratio)
-    val_end = train_end + int(n * val_ratio)
-
-    ranges = {'train': (0, train_end), 'val': (train_end, val_end), 'test': (val_end, n)}
-    start, end = ranges.get(split, (val_end, n))
-    return shuffled[start:end]
-
-
 def split_indices_by_ratio(num_items, split, train_ratio=0.8, val_ratio=0.1, seed=42):
 
     rng = np.random.RandomState(seed)

@@ -12,7 +12,8 @@ from models.stage1 import ConvNeXt
 from models.stage1_mobilenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 from utils.head import ArcNet
-from utils.datasets import PolyUDataset, CASIADataset
+# from utils.datasets import PolyUDataset, CASIADataset
+from utils.datasets_txt import TxtImageDataset
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -77,36 +78,20 @@ def get_transforms(img_size, strong=True):
     base += [transforms.ToTensor(), transforms.Normalize(mean=[0.5], std=[0.5])]
     return transforms.Compose(base)
 
-def create_dataloaders(data_dir, split, batch_size, modality=None):
-    if modality:  
-        dataset = PolyUDataset(
-            data_dir=data_dir,
-            split=split,
-            transform=get_transforms(config.input_size, strong=(split == 'train')),
-            train_ratio=config.train_ratio,
-            val_ratio=config.val_ratio,
-            seed=42
-        )
-    else: 
-        dataset = CASIADataset(
-            palm_dir=config.casia_vi,
-            vein_dir=config.casia_ir,
-            split=split,
-            transform_palm=get_transforms(config.input_size, strong=(split == 'train')),
-            transform_vein=get_transforms(config.input_size, strong=(split == 'train')),
-            train_ratio=config.train_ratio,
-            val_ratio=config.val_ratio,
-            seed=42
-        )
+def create_dataloaders_from_txt(list_file, batch_size):
+    train_tf = get_transforms(224, strong=True)
+    val_tf   = get_transforms(224, strong=False)
 
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=(split == 'train'),
-        num_workers=config.num_workers,
-        pin_memory=True,
-        drop_last=(split == 'train')
-    ), dataset.num_classes
+    train_dataset = TxtImageDataset(list_file=list_file, split="train", transform=train_tf)
+    val_dataset   = TxtImageDataset(list_file=list_file, split="val",   transform=val_tf)
+
+    labels = [label for _, label in train_dataset.samples]
+    num_classes = max(labels) + 1 if labels else 0
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=config.num_workers)
+    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=config.num_workers)
+
+    return train_loader, val_loader, num_classes
 
 def build_backbone(name):
     name = name.lower()
@@ -115,7 +100,7 @@ def build_backbone(name):
         feat_dim = model.out_dim
         local_dim = model.local_dim
     elif name in ('mobilefacenet', 'mobile'):
-        model = MobileFaceNet(input_channel=1, input_size=config.input_size).to(config.device)
+        model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
     else:
@@ -123,11 +108,10 @@ def build_backbone(name):
     return model, feat_dim, local_dim
 
 
-def train_phase1(model, config, writer, model_name, modality, feat_dim):
+def train_phase1(model, config, writer, model_name, feat_dim):
 
-    data_dir = config.polyu_red if modality == 'palm' else config.polyu_nir
-    train_loader, num_classes = create_dataloaders(data_dir, 'train', config.p1_batch, modality)
-    val_loader, _ = create_dataloaders(data_dir, 'val', config.p1_batch, modality)
+    list_file = 'polyu_list.txt'
+    train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
     criterion = ArcNet(
         feature_dim=feat_dim,
@@ -183,8 +167,6 @@ def train_phase1(model, config, writer, model_name, modality, feat_dim):
         avg_train_loss = train_loss / len(train_loader)
         avg_train_acc = 100. * train_correct / train_total
 
-        scheduler.step()
-
         model.eval()
         criterion.eval()
         val_total_loss, val_correct, val_total = 0.0, 0, 0
@@ -218,6 +200,8 @@ def train_phase1(model, config, writer, model_name, modality, feat_dim):
             writer.add_scalar(f'Phase1_{model_name}/TrainAcc', avg_train_acc, epoch)
             writer.add_scalar(f'Phase1_{model_name}/ValLoss', avg_val_loss, epoch)
             writer.add_scalar(f'Phase1_{model_name}/ValAcc', avg_val_acc, epoch)
+
+        scheduler.step()
 
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
@@ -390,10 +374,10 @@ def main():
     skip_stage1 = False  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
-        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', 'palm', feat_dim)
+        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', feat_dim)
         print(f" Palm(Best Acc: {palm_acc:.2f}%)")
 
-        vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', 'vein', feat_dim)
+        vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', feat_dim)
         print(f" Vein(Best Acc: {vein_acc:.2f}%)")
 
     best_acc = train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim)

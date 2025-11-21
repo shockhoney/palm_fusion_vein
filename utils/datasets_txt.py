@@ -87,4 +87,9 @@ class TxtImageDataset(Dataset):
 
         return img, label
 
-
+if __name__ == '__main__':
+     gen_polyu_list("C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\PolyU\\Red",
+    out_txt="polyu__Red_list.txt",
+    train_ratio=0.8,
+    val_ratio=0.1,
+    seed=42)

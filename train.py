@@ -23,11 +23,11 @@ class Config:
     input_size = 224
     num_workers = 4
 
-    polyu_nir = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\PolyU\\NIR'
-    polyu_red = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\PolyU\\Red'
     casia_vi = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\CASIA_dataset\\vi'
     casia_ir = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\CASIA_dataset\\ir'
 
+    list_file_palm = 'polyu_Red_list.txt'
+    list_file_vein = 'polyu_NIR_list.txt'
     p1_epochs, p1_batch, p1_lr = 150, 32, 1e-4
     p1_patience = 20
     train_ratio, val_ratio = 0.8, 0.1
@@ -110,7 +110,14 @@ def build_backbone(name):
 
 def train_phase1(model, config, writer, model_name, feat_dim):
 
-    list_file = 'polyu_list.txt'
+    name_low = model_name.lower()
+    if 'palm' in name_low:
+        list_file = config.list_file_palm
+    elif 'vein' in name_low:
+        list_file = config.list_file_vein
+    else:
+        list_file = config.list_file_palm
+
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
     criterion = ArcNet(

@@ -51,3 +51,13 @@ class ArcNet(nn.Module):
         mask = (target > limit).float()
         output = torch.multiply(mask, x) + torch.multiply((1.0 - mask), y)
         return output
+
+class LinearHead(nn.Module):
+    """简单的线性分类层，输出原始 logits，交给 CrossEntropyLoss 内部的 log-softmax 处理。"""
+
+    def __init__(self, feature_dim: int, class_dim: int):
+        super().__init__()
+        self.fc = nn.Linear(feature_dim, class_dim)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.fc(features)

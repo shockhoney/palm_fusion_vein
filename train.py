@@ -12,6 +12,7 @@ from models.stage1 import ConvNeXt
 from models.stage1_mobilenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 from utils.head import ArcNet
+from utils.head import LinearHead
 # from utils.datasets import PolyUDataset, CASIADataset
 from utils.datasets_txt import TxtImageDataset
 
@@ -120,17 +121,17 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
-    criterion = ArcNet(
-        feature_dim=feat_dim,
-        class_dim=num_classes,
-        margin=0.20,
-        scale=30.0,
-    ).to(config.device)
-
+    # criterion = ArcNet(
+    #     feature_dim=feat_dim,
+    #     class_dim=num_classes,
+    #     margin=0.20,
+    #     scale=30.0,
+    # ).to(config.device)
+    classifier = LinearHead(feature_dim=feat_dim,class_dim=num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(criterion.parameters()),
+        list(model.parameters()) + list(classifier.parameters()),
         lr=config.p1_lr,
         weight_decay=1e-4   
     )
@@ -145,7 +146,8 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     for epoch in range(config.p1_epochs):
         model.train()
-        criterion.train()
+        # criterion.train()
+        classifier.train()
 
         train_loss, train_correct, train_total = 0.0, 0, 0
 
@@ -156,14 +158,19 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         for images, labels in train_loader:
             images, labels = images.to(config.device), labels.to(config.device)
             features = model(images, return_spatial=False)
-            logits = criterion(features, labels)
+            # logits = criterion(features, labels)
+            logits = classifier(features)
             loss = ce_loss(logits, labels)
             optimizer.zero_grad()
             loss.backward()
 
+            # torch.nn.utils.clip_grad_norm_(
+            #     list(model.parameters()) + list(criterion.parameters()), max_norm=5.0
+            # )
             torch.nn.utils.clip_grad_norm_(
-                list(model.parameters()) + list(criterion.parameters()), max_norm=5.0
+                list(model.parameters()) + list(classifier.parameters()), max_norm=5.0
             )
+            
             optimizer.step()
             train_loss += loss.item()
             preds = logits.argmax(dim=1)
@@ -175,7 +182,8 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         avg_train_acc = 100. * train_correct / train_total
 
         model.eval()
-        criterion.eval()
+        # criterion.eval()
+        classifier.eval()
         val_total_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
             val_steps = 0
@@ -183,7 +191,9 @@ def train_phase1(model, config, writer, model_name, feat_dim):
                 images, labels = images.to(config.device), labels.to(config.device)
 
                 features = model(images, return_spatial=False)
-                logits = criterion(features, labels)
+                # logits = criterion(features, labels)
+                logits = classifier(features)
+
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
                 preds = logits.argmax(dim=1)
@@ -214,7 +224,8 @@ def train_phase1(model, config, writer, model_name, feat_dim):
             best_acc = avg_val_acc
             torch.save({
                 'model': model.state_dict(),          
-                'criterion': criterion.state_dict()                  
+                # 'criterion': criterion.state_dict() 
+                'classifier':classifier.state_dict()                 
             }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
 
         # if early_stop(-avg_val_acc, mode='min'):

@@ -7,36 +7,47 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
-
 from models.stage1 import ConvNeXt
 from models.stage1_mobilenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
-from utils.head import ArcNet
-from utils.head import LinearHead
-# from utils.datasets import PolyUDataset, CASIADataset
-from utils.datasets_txt import TxtImageDataset
+from utils.head import ArcFace
+from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     save_dir = 'outputs/models'
-    backbone = 'convnext'  # 'convnext' or 'mobilefacenet'
+    backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
 
     input_size = 224
     num_workers = 4
 
-    casia_vi = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\CASIA_dataset\\vi'
-    casia_ir = 'C:\\Users\\admin\\Desktop\\palm_fusion_vein\\data\\CASIA_dataset\\ir'
-
     list_file_palm = 'polyu_Red_list.txt'
     list_file_vein = 'polyu_NIR_list.txt'
-    p1_epochs, p1_batch, p1_lr = 150, 32, 1e-4
-    p1_patience = 20
-    train_ratio, val_ratio = 0.8, 0.1
+    phase2_train = 'casia_phase2_train.txt'
+    phase2_val = 'casia_phase2_val.txt'
+
+    p1_epochs, p1_batch, p1_lr = 120, 32, 1e-3
+    p1_patience = 25
     p2_epochs, p2_batch, p2_lr, p2_enc_lr = 50, 16, 1e-4, 1e-5
-    p2_patience = 10
+    p2_patience = 15
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
+
+def build_backbone(name):
+
+    name = name.lower()
+    if name == 'convnext':
+        model = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
+        feat_dim = model.out_dim
+        local_dim = model.local_dim
+    elif name in ('mobilefacenet', 'mobile'):
+        model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
+        feat_dim = model.out_dim
+        local_dim = model.local_dim
+    else:
+        raise ValueError(f"Unsupported backbone: {name}")
+    return model, feat_dim, local_dim
 
 class EarlyStopping:
     def __init__(self, patience=10, min_delta=0.001):
@@ -76,7 +87,7 @@ def get_transforms(img_size, strong=True):
             transforms.RandomRotation(5),
             transforms.RandomAffine(0, translate=(0.05, 0.05))
         ]
-    base += [transforms.ToTensor(), transforms.Normalize(mean=[0.5], std=[0.5])]
+    base += [transforms.Grayscale(num_output_channels=3),transforms.ToTensor(), transforms.Normalize(mean=[0.5], std=[0.5])]
     return transforms.Compose(base)
 
 def create_dataloaders_from_txt(list_file, batch_size):
@@ -94,19 +105,31 @@ def create_dataloaders_from_txt(list_file, batch_size):
 
     return train_loader, val_loader, num_classes
 
-def build_backbone(name):
-    name = name.lower()
-    if name == 'convnext':
-        model = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
-        feat_dim = model.out_dim
-        local_dim = model.local_dim
-    elif name in ('mobilefacenet', 'mobile'):
-        model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
-        feat_dim = model.out_dim
-        local_dim = model.local_dim
-    else:
-        raise ValueError(f"Unsupported backbone: {name}")
-    return model, feat_dim, local_dim
+def create_phase2_dataloaders(train_list, val_list, batch_size):
+    train_tf = get_transforms(config.input_size, strong=True)
+    val_tf   = get_transforms(config.input_size, strong=False)
+
+    train_dataset = PairTxtDataset(list_file=train_list,transform_palm=train_tf,transform_vein=train_tf)
+    val_dataset = PairTxtDataset(list_file=val_list,transform_palm=val_tf,transform_vein=val_tf)
+
+    labels = [label for _, _, label in train_dataset.samples]
+    num_classes = max(labels) + 1 if labels else 0
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=config.num_workers
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=config.num_workers
+    )
+
+    return train_loader, val_loader, num_classes
+
 
 
 def train_phase1(model, config, writer, model_name, feat_dim):
@@ -121,33 +144,33 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
-    # criterion = ArcNet(
+    # criterion = ArcFace(
     #     feature_dim=feat_dim,
-    #     class_dim=num_classes,
-    #     margin=0.20,
-    #     scale=30.0,
+    #     num_classes=num_classes,
+    #     m=0.20,
+    #     s=30.0,
+    #     easy_margin=True
     # ).to(config.device)
-    classifier = LinearHead(feature_dim=feat_dim,class_dim=num_classes).to(config.device)
+    # ce_loss = nn.CrossEntropyLoss()
+
+
+    criterion = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(classifier.parameters()),
+        list(model.parameters()) + list(criterion.parameters()),
         lr=config.p1_lr,
-        weight_decay=1e-4   
-    )
+        weight_decay=1e-4)
 
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
                                 milestones=[int(0.5 * config.p1_epochs), 
                             int(0.75 * config.p1_epochs)], gamma=0.1)
-
-    # early_stop = EarlyStopping(patience=config.p1_patience)
-
+    early_stop = EarlyStopping(patience=config.p1_patience)
     best_acc = 0.0 
 
     for epoch in range(config.p1_epochs):
         model.train()
-        # criterion.train()
-        classifier.train()
+        criterion.train()
 
         train_loss, train_correct, train_total = 0.0, 0, 0
 
@@ -158,19 +181,16 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         for images, labels in train_loader:
             images, labels = images.to(config.device), labels.to(config.device)
             features = model(images, return_spatial=False)
-            # logits = criterion(features, labels)
-            logits = classifier(features)
+            logits = criterion(features)
             loss = ce_loss(logits, labels)
+
             optimizer.zero_grad()
             loss.backward()
 
-            # torch.nn.utils.clip_grad_norm_(
-            #     list(model.parameters()) + list(criterion.parameters()), max_norm=5.0
-            # )
             torch.nn.utils.clip_grad_norm_(
-                list(model.parameters()) + list(classifier.parameters()), max_norm=5.0
-            )
-            
+                 list(model.parameters()) + list(criterion.parameters()), max_norm=5.0
+             )
+
             optimizer.step()
             train_loss += loss.item()
             preds = logits.argmax(dim=1)
@@ -182,8 +202,8 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         avg_train_acc = 100. * train_correct / train_total
 
         model.eval()
-        # criterion.eval()
-        classifier.eval()
+        criterion.eval()
+
         val_total_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
             val_steps = 0
@@ -191,8 +211,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
                 images, labels = images.to(config.device), labels.to(config.device)
 
                 features = model(images, return_spatial=False)
-                # logits = criterion(features, labels)
-                logits = classifier(features)
+                logits = criterion(features)
 
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
@@ -224,13 +243,12 @@ def train_phase1(model, config, writer, model_name, feat_dim):
             best_acc = avg_val_acc
             torch.save({
                 'model': model.state_dict(),          
-                # 'criterion': criterion.state_dict() 
-                'classifier':classifier.state_dict()                 
-            }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
+                 'criterion': criterion.state_dict()                
+            }, os.path.join(config.save_dir, f'{model_name}_phase1_M_best.pth'))
 
-        # if early_stop(-avg_val_acc, mode='min'):
-        #     print(f"Early stopping at epoch {epoch+1}")
-        #     break
+        if early_stop(-avg_val_acc, mode='min'):
+            print(f"Early stopping at epoch {epoch+1}")
+            break
          
     return best_acc
 
@@ -244,8 +262,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
         else:
             print(f" {name}not exist ")
 
-    train_loader, num_classes = create_dataloaders(None, 'train', config.p2_batch)
-    val_loader, _ = create_dataloaders(None, 'val', config.p2_batch)
+    train_loader, val_loader, num_classes = create_phase2_dataloaders( config.phase2_train,config.phase2_val,config.p2_batch)
 
     out_dim_local = min(256, local_dim)
     fusion_model = Stage2Fusion(
@@ -254,24 +271,23 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
         out_dim_local=out_dim_local, final_l2norm=True,
         ).to(config.device)
 
+    # criterion = ArcNet(
+    #     feature_dim=feat_dim,
+    #     class_dim=num_classes,
+    #     margin=0.20,
+    #     scale=30.0,
+    # ).to(config.device)
+    criterion = nn.Linear(2*feat_dim, num_classes).to(config.device)
+    ce_loss = nn.CrossEntropyLoss()
+
     optimizer = torch.optim.Adam([
         {'params': fusion_model.parameters(), 'lr': config.p2_lr},
         {'params': cnn_palm.parameters(), 'lr': config.p2_enc_lr},
-        {'params': cnn_vein.parameters(), 'lr': config.p2_enc_lr}
-    ], weight_decay=1e-4)  # Reduced from 1e-2 to 1e-4
-
+        {'params': cnn_vein.parameters(), 'lr': config.p2_enc_lr},
+        {'params': criterion.parameters(), 'lr': config.p2_lr}], weight_decay=1e-4)  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
-    criterion = ArcNet(
-        feature_dim=feat_dim,
-        class_dim=num_classes,
-        margin=0.20,
-        scale=30.0,
-    ).to(config.device)
-    ce_loss = nn.CrossEntropyLoss()
-
-    # early_stop = EarlyStopping(patience=config.p2_patience)
-
+    early_stop = EarlyStopping(patience=config.p2_patience)
     best_acc = 0.0
  
     for epoch in range(config.p2_epochs):
@@ -299,7 +315,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 palm_global, vein_global, palm_local, vein_local
             )
 
-            logits = criterion(fused_feat, labels)
+            logits = criterion(fused_feat)
             loss = ce_loss(logits, labels)
             optimizer.zero_grad()
 
@@ -308,6 +324,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
             torch.nn.utils.clip_grad_norm_(cnn_palm.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(cnn_vein.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(fusion_model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(criterion.parameters(),   1.0)
 
             optimizer.step()
 
@@ -340,7 +357,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
                 fused_feat = fusion_model(palm_global, vein_global, palm_local, vein_local)
 
-                logits = criterion(fused_feat, labels)
+                logits = criterion(fused_feat)
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
 
@@ -374,9 +391,9 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 'fusion': fusion_model.state_dict(),
             }, os.path.join(config.save_dir, 'stage2_best.pth'))
 
-        # if early_stop(-avg_val_acc, mode='min'):
-        #     print(f"Early stopping at epoch {epoch+1}")
-        #     break
+        if early_stop(-avg_val_acc, mode='min'):
+            print(f"Early stopping at epoch {epoch+1}")
+            break
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -389,12 +406,12 @@ def main():
     cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
     cnn_vein, _, _ = build_backbone(config.backbone)
 
-    skip_stage1 = False  # 设置为 True 跳过 Stage 1
+    skip_stage1 = True  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
+
         palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', feat_dim)
         print(f" Palm(Best Acc: {palm_acc:.2f}%)")
-
         vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', feat_dim)
         print(f" Vein(Best Acc: {vein_acc:.2f}%)")
 

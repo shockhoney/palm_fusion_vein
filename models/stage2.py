@@ -114,20 +114,18 @@ class Stage2Fusion(nn.Module):
                 vein_local: torch.Tensor,
                ):
 
-
         global_palm_enhanced, global_vein_enhanced = self.global_cross_attn(palm_global, vein_global)
         global_fused, global_w_palm, global_w_vein = self.global_channel_fusion(
             global_palm_enhanced, global_vein_enhanced
         )
-
 
         if palm_local.dim() == 4:  # (N, C, H, W)
             palm_local = palm_local.mean(dim=[2, 3])  # (N, C)
         if vein_local.dim() == 4:  # (N, C, H, W)
             vein_local = vein_local.mean(dim=[2, 3])  # (N, C)
 
-        palm_local_aligned = self.local_align_palm(palm_local)  # (N, out_dim_local)
-        vein_local_aligned = self.local_align_vein(vein_local)  # (N, out_dim_local)
+        palm_local_aligned = self.local_align_palm(palm_local) 
+        vein_local_aligned = self.local_align_vein(vein_local) 
 
 
         local_palm_enhanced, local_vein_enhanced = self.local_cross_attn(
@@ -138,9 +136,8 @@ class Stage2Fusion(nn.Module):
         )
 
  
-        fused_feat = torch.cat([global_fused, local_fused], dim=1)  # (N, concat_dim)
+        fused_feat = torch.cat([global_fused, local_fused], dim=1)  
 
-        # 线性压到 out_dim_final（默认 512）
         fused_feat = self.proj(fused_feat)  
 
         if self.final_l2norm:

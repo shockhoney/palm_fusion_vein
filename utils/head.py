@@ -1,63 +1,48 @@
 import math
-
 import torch
 import torch.nn as nn
-from torch.nn import Parameter
+import torch.nn.functional as F
 
 
-class ArcNet(nn.Module):
-    def __init__(self,
-                 feature_dim,
-                 class_dim,
-                 margin=0.5,
-                 scale=64.0,
-                 easy_margin=False):
-        
+class ArcFace(nn.Module):
+
+    def __init__(self, feature_dim, num_classes, s=30.0, m=0.50, easy_margin=False):
         super().__init__()
         self.feature_dim = feature_dim
-        self.class_dim = class_dim
-        self.margin = margin
-        self.scale = scale
+        self.num_classes = num_classes
+        self.s = s
+        self.m = m
         self.easy_margin = easy_margin
-        self.weight = Parameter(torch.FloatTensor(feature_dim, class_dim))
+
+        self.weight = nn.Parameter(torch.FloatTensor(num_classes, feature_dim))
         nn.init.xavier_uniform_(self.weight)
 
-    def forward(self, input, label):
-        input_norm = torch.sqrt(torch.sum(torch.square(input), dim=1, keepdim=True))
-        input = torch.divide(input, input_norm)
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        self.th = math.cos(math.pi - m)  
+        self.mm = math.sin(math.pi - m) * m
 
-        weight_norm = torch.sqrt(torch.sum(torch.square(self.weight), dim=0, keepdim=True))
-        weight = torch.divide(self.weight, weight_norm)
+    def forward(self, features, labels):
 
-        cos = torch.matmul(input, weight)
-        sin = torch.sqrt(1.0 - torch.square(cos) + 1e-6)
-        cos_m = math.cos(self.margin)
-        sin_m = math.sin(self.margin)
-        phi = cos * cos_m - sin * sin_m
+        x = F.normalize(features, dim=1)            
+        W = F.normalize(self.weight, dim=1)          
 
-        th = math.cos(self.margin) * (-1)
-        mm = math.sin(self.margin) * self.margin
+        cos_theta = F.linear(x, W)                  
+        cos_theta = cos_theta.clamp(-1.0, 1.0)     
+        sin_theta = torch.sqrt(1.0 - torch.pow(cos_theta, 2))
+        cos_theta_m = cos_theta * self.cos_m - sin_theta * self.sin_m
+
         if self.easy_margin:
-            phi = self._paddle_where_more_than(cos, 0, phi, cos)
+            cond = (cos_theta > 0).float()
+            cos_theta_m = cond * cos_theta_m + (1.0 - cond) * cos_theta
         else:
-            phi = self._paddle_where_more_than(cos, th, phi, cos - mm)
-        one_hot = torch.nn.functional.one_hot(label, self.class_dim)
-        one_hot = torch.squeeze(one_hot, dim=1)
-        output = torch.multiply(one_hot, phi) + torch.multiply((1.0 - one_hot), cos)
-        output = output * self.scale
-        return output
+            cond = (cos_theta > self.th).float()
+            cos_theta_m = cond * cos_theta_m + (1.0 - cond) * (cos_theta - self.mm)
 
-    def _paddle_where_more_than(self, target, limit, x, y):
-        mask = (target > limit).float()
-        output = torch.multiply(mask, x) + torch.multiply((1.0 - mask), y)
-        return output
+        one_hot = torch.zeros_like(cos_theta)      
+        one_hot.scatter_(1, labels.view(-1, 1), 1.0)
 
-class LinearHead(nn.Module):
-    """简单的线性分类层，输出原始 logits，交给 CrossEntropyLoss 内部的 log-softmax 处理。"""
+        logits = one_hot * cos_theta_m + (1.0 - one_hot) * cos_theta
+        logits = logits * self.s                    
 
-    def __init__(self, feature_dim: int, class_dim: int):
-        super().__init__()
-        self.fc = nn.Linear(feature_dim, class_dim)
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.fc(features)
+        return logits

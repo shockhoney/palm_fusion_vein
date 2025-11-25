@@ -18,9 +18,9 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "polyu_NIR_list.txt"
-    red_list = "polyu_Red_list.txt"
-    casia_pair_txt = "casia_phase2_val.txt"
+    nir_list = "polyu__NIR_list.txt"
+    red_list = "polyu__Red_list.txt"
+    casia_pair_txt = "phase2_test_pairs.txt"
     backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
 
@@ -142,17 +142,9 @@ def main():
     eval_with_metrics(nir_scores, nir_pair_labels, name="Phase1 - NIR (vein) only")
     eval_with_metrics(red_scores, red_pair_labels, name="Phase1 - Red (palm) only")
 
-    # === 4. 二期：在 CASIA 配对验证集上评估融合模型 ===
     if os.path.exists(cfg.casia_pair_txt):
-        pair_dataset = PairTxtDataset(
-            cfg.casia_pair_txt,
-            transform_palm=tf_test,
-            transform_vein=tf_test)
-        pair_loader = DataLoader(
-            pair_dataset,
-            batch_size=cfg.batch_size,
-            shuffle=False,
-            num_workers=cfg.num_workers)
+        pair_dataset = PairTxtDataset(cfg.casia_pair_txt,transform_palm=tf_test,transform_vein=tf_test)
+        pair_loader = DataLoader( pair_dataset,batch_size=cfg.batch_size,shuffle=False,num_workers=cfg.num_workers)
 
         fused_feats, fused_labels = extract_fusion_features(cnn_palm, cnn_vein, fusion_model, pair_loader, device)
         fused_scores, fused_pair_labels = build_pair_scores(fused_feats, fused_labels)

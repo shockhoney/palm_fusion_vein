@@ -5,12 +5,7 @@ from torch.utils.data import Dataset
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp')
 
-def gen_polyu_list(
-    root_dir,
-    out_txt="polyu_list.txt",
-    train_ratio=0.8,
-    val_ratio=0.1,
-    seed=42):
+def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=0.1,seed=42):
     random.seed(seed)
 
     all_pids = sorted([
@@ -88,11 +83,7 @@ class TxtImageDataset(Dataset):
         return img, label
 
 
-def phase2_list(root_dir: str,
-                       train_txt: str,
-                       val_txt: str,
-                       val_ratio: float = 0.2,
-                       seed: int = 42):
+def phase2_list(root_dir,train_txt,val_txt,val_ratio = 0.2,seed = 42):
 
     ir_dir = os.path.join(root_dir, "ir")
     vi_dir = os.path.join(root_dir, "vi")
@@ -169,7 +160,7 @@ class PairTxtDataset(Dataset):
         palm_path, vein_path, label = self.samples[idx]
 
         palm_img = Image.open(palm_path).convert('RGB')
-        vein_img = Image.open(vein_path).convert('RGB')
+        vein_img = Image.open(vein_path).convert('L')
 
         if self.transform_palm:
             palm_img = self.transform_palm(palm_img)

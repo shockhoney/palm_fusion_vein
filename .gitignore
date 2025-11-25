@@ -13,3 +13,4 @@ outputs/models/
 
 #txtfiles
 *.txt
+!requirements.txt

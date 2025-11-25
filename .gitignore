@@ -11,4 +11,5 @@ utils/__pycache__/
 #checkpoints
 outputs/models/ 
 
-
+#txtfiles
+*.txt

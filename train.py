@@ -153,7 +153,6 @@ def train_phase1(model, config, writer, model_name, feat_dim):
     # ).to(config.device)
     # ce_loss = nn.CrossEntropyLoss()
 
-
     criterion = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 

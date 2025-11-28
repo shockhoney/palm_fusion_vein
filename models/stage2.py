@@ -127,7 +127,6 @@ class Stage2Fusion(nn.Module):
         palm_local_aligned = self.local_align_palm(palm_local) 
         vein_local_aligned = self.local_align_vein(vein_local) 
 
-
         local_palm_enhanced, local_vein_enhanced = self.local_cross_attn(
             palm_local_aligned, vein_local_aligned
         )

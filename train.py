@@ -14,7 +14,7 @@ from utils.head import ArcFace
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
 class Config:
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
     backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
 
@@ -153,11 +153,11 @@ def train_phase1(model, config, writer, model_name, feat_dim):
     # ).to(config.device)
     # ce_loss = nn.CrossEntropyLoss()
 
-    criterion = nn.Linear(feat_dim, num_classes).to(config.device)
+    classifier = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(criterion.parameters()),
+        list(model.parameters()) + list(classifier.parameters()),
         lr=config.p1_lr,
         weight_decay=1e-4)
 
@@ -169,7 +169,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     for epoch in range(config.p1_epochs):
         model.train()
-        criterion.train()
+        classifier.train()
 
         train_loss, train_correct, train_total = 0.0, 0, 0
 
@@ -180,14 +180,14 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         for images, labels in train_loader:
             images, labels = images.to(config.device), labels.to(config.device)
             features = model(images, return_spatial=False)
-            logits = criterion(features)
+            logits = classifier(features)
             loss = ce_loss(logits, labels)
 
             optimizer.zero_grad()
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
-                 list(model.parameters()) + list(criterion.parameters()), max_norm=5.0
+                 list(model.parameters()) + list(classifier.parameters()), max_norm=5.0
              )
 
             optimizer.step()
@@ -201,7 +201,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         avg_train_acc = 100. * train_correct / train_total
 
         model.eval()
-        criterion.eval()
+        classifier.eval()
 
         val_total_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
@@ -210,7 +210,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
                 images, labels = images.to(config.device), labels.to(config.device)
 
                 features = model(images, return_spatial=False)
-                logits = criterion(features)
+                logits = classifier(features)
 
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
@@ -242,7 +242,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
             best_acc = avg_val_acc
             torch.save({
                 'model': model.state_dict(),          
-                 'criterion': criterion.state_dict()                
+                 'classifier': classifier.state_dict()                
             }, os.path.join(config.save_dir, f'{model_name}_phase1_M_best.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
@@ -276,14 +276,14 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
     #     margin=0.20,
     #     scale=30.0,
     # ).to(config.device)
-    criterion = nn.Linear(2*feat_dim, num_classes).to(config.device)
+    classifier = nn.Linear(2*feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam([
         {'params': fusion_model.parameters(), 'lr': config.p2_lr},
         {'params': cnn_palm.parameters(), 'lr': config.p2_enc_lr},
         {'params': cnn_vein.parameters(), 'lr': config.p2_enc_lr},
-        {'params': criterion.parameters(), 'lr': config.p2_lr}], weight_decay=1e-4)  
+        {'params': classifier.parameters(), 'lr': config.p2_lr}], weight_decay=1e-4)  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
     early_stop = EarlyStopping(patience=config.p2_patience)
@@ -314,7 +314,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 palm_global, vein_global, palm_local, vein_local
             )
 
-            logits = criterion(fused_feat)
+            logits = classifier(fused_feat)
             loss = ce_loss(logits, labels)
             optimizer.zero_grad()
 
@@ -323,7 +323,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
             torch.nn.utils.clip_grad_norm_(cnn_palm.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(cnn_vein.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(fusion_model.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(criterion.parameters(),   1.0)
+            torch.nn.utils.clip_grad_norm_(classifier.parameters(),   1.0)
 
             optimizer.step()
 
@@ -356,7 +356,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
                 fused_feat = fusion_model(palm_global, vein_global, palm_local, vein_local)
 
-                logits = criterion(fused_feat)
+                logits = classifier(fused_feat)
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
 

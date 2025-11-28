@@ -20,7 +20,7 @@ class Config:
     num_workers = 4
     nir_list = "polyu__NIR_list.txt"
     red_list = "polyu__Red_list.txt"
-    casia_pair_txt = "phase2_test_pairs.txt"
+    phase2_pair_txt = "phase2_test_pairs.txt"
     backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
 
@@ -142,15 +142,15 @@ def main():
     eval_with_metrics(nir_scores, nir_pair_labels, name="Phase1 - NIR (vein) only")
     eval_with_metrics(red_scores, red_pair_labels, name="Phase1 - Red (palm) only")
 
-    if os.path.exists(cfg.casia_pair_txt):
-        pair_dataset = PairTxtDataset(cfg.casia_pair_txt,transform_palm=tf_test,transform_vein=tf_test)
+    if os.path.exists(cfg.phase2_pair_txt):
+        pair_dataset = PairTxtDataset(cfg.phase2_pair_txt,transform_palm=tf_test,transform_vein=tf_test)
         pair_loader = DataLoader( pair_dataset,batch_size=cfg.batch_size,shuffle=False,num_workers=cfg.num_workers)
 
         fused_feats, fused_labels = extract_fusion_features(cnn_palm, cnn_vein, fusion_model, pair_loader, device)
         fused_scores, fused_pair_labels = build_pair_scores(fused_feats, fused_labels)
         eval_with_metrics(fused_scores, fused_pair_labels, name="Phase2 - Fusion (NIR+Red)")
     else:
-        print(f"Warning: casia_pair_txt '{cfg.casia_pair_txt}' not found")
+        print(f"Warning: '{cfg.phase2_pair_txt}' not found")
 
 
 if __name__ == "__main__":

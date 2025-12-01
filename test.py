@@ -18,9 +18,9 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "polyu__NIR_list.txt"
-    red_list = "polyu__Red_list.txt"
-    phase2_pair_txt = "phase2_test_pairs.txt"
+    nir_list = "polyu_NIR_list.txt"
+    red_list = "polyu_Red_list.txt"
+    phase2_pair_txt = "casia_phase2_train.txt"
     backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
 
@@ -90,10 +90,7 @@ def extract_fusion_features(cnn_palm: nn.Module,cnn_vein: nn.Module,fusion_model
         palm_global = cnn_palm(palm_img)                 
         vein_global = cnn_vein(vein_img)                 
 
-        palm_local = cnn_palm(palm_img, return_spatial=True)
-        vein_local = cnn_vein(vein_img, return_spatial=True)
-
-        fused = fusion_model(palm_global, vein_global, palm_local, vein_local)
+        fused = fusion_model(palm_global, vein_global)
         fused = F.normalize(fused, dim=1)
 
         feats.append(fused.cpu().numpy())
@@ -108,14 +105,7 @@ def main():
 
     cnn_palm, feat_dim, local_dim = build_backbone(cfg.backbone)
     cnn_vein, _, _ = build_backbone(cfg.backbone)
-    fusion_model = Stage2Fusion(
-        in_dim_global_palm=feat_dim,
-        in_dim_global_vein=feat_dim,
-        in_dim_local_palm=local_dim,
-        in_dim_local_vein=local_dim,
-        out_dim_local=min(256, local_dim),
-        final_l2norm=True,
-        out_dim_final=512).to(device)
+    fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(device)
 
     # 只需加载第二阶段checkpoint，里面含有第一阶段的模型权重和融合模型权重
     ckpt = torch.load(cfg.stage2_ckpt, map_location=device)

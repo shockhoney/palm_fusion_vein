@@ -10,7 +10,7 @@ from tqdm import tqdm
 from models.stage1 import ConvNeXt
 from models.stage1_mobilenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
-from utils.head import ArcFace
+from utils.head import Arcface_Head
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
 class Config:
@@ -23,13 +23,13 @@ class Config:
 
     list_file_palm = 'polyu_Red_list.txt'
     list_file_vein = 'polyu_NIR_list.txt'
-    phase2_train = 'casia_phase2_train.txt'
-    phase2_val = 'casia_phase2_val.txt'
+    phase2_train = 'polyu_phase2_train.txt'
+    phase2_val = 'polyu_phase2_val.txt'
 
     p1_epochs, p1_batch, p1_lr = 120, 32, 1e-3
-    p1_patience = 25
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 50, 16, 1e-4, 1e-5
-    p2_patience = 15
+    p1_patience = 20
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 100, 16, 1e-4, 1e-5
+    p2_patience = 20
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
@@ -139,31 +139,19 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         list_file = config.list_file_palm
     elif 'vein' in name_low:
         list_file = config.list_file_vein
-    else:
-        list_file = config.list_file_palm
 
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
-    # criterion = ArcFace(
-    #     feature_dim=feat_dim,
-    #     num_classes=num_classes,
-    #     m=0.20,
-    #     s=30.0,
-    #     easy_margin=True
-    # ).to(config.device)
-    # ce_loss = nn.CrossEntropyLoss()
+    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=30.0,m=0.20,).to(config.device)
 
-    classifier = nn.Linear(feat_dim, num_classes).to(config.device)
+    # classifier = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(classifier.parameters()),
-        lr=config.p1_lr,
-        weight_decay=1e-4)
+        lr=config.p1_lr,weight_decay=1e-4)
 
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
-                                milestones=[int(0.5 * config.p1_epochs), 
-                            int(0.75 * config.p1_epochs)], gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=[int(0.5 * config.p1_epochs),int(0.75 * config.p1_epochs)], gamma=0.1)
     early_stop = EarlyStopping(patience=config.p1_patience)
     best_acc = 0.0 
 
@@ -180,7 +168,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         for images, labels in train_loader:
             images, labels = images.to(config.device), labels.to(config.device)
             features = model(images, return_spatial=False)
-            logits = classifier(features)
+            logits = classifier(features, labels)
             loss = ce_loss(logits, labels)
 
             optimizer.zero_grad()
@@ -210,7 +198,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
                 images, labels = images.to(config.device), labels.to(config.device)
 
                 features = model(images, return_spatial=False)
-                logits = classifier(features)
+                logits = classifier(features, labels)
 
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
@@ -243,7 +231,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
             torch.save({
                 'model': model.state_dict(),          
                  'classifier': classifier.state_dict()                
-            }, os.path.join(config.save_dir, f'{model_name}_phase1_M_best.pth'))
+            }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"Early stopping at epoch {epoch+1}")
@@ -263,20 +251,15 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
     train_loader, val_loader, num_classes = create_phase2_dataloaders( config.phase2_train,config.phase2_val,config.p2_batch)
 
-    out_dim_local = min(256, local_dim)
-    fusion_model = Stage2Fusion(
-        in_dim_global_palm=feat_dim, in_dim_global_vein=feat_dim,
-        in_dim_local_palm=local_dim, in_dim_local_vein=local_dim,
-        out_dim_local=out_dim_local, final_l2norm=True,
-        ).to(config.device)
+    fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(config.device)
 
-    # criterion = ArcNet(
-    #     feature_dim=feat_dim,
-    #     class_dim=num_classes,
-    #     margin=0.20,
-    #     scale=30.0,
-    # ).to(config.device)
-    classifier = nn.Linear(2*feat_dim, num_classes).to(config.device)
+    classifier = Arcface_Head(
+        embedding_size=512,
+        num_classes=num_classes,
+        s=30.0,
+        m=0.20,
+    ).to(config.device)
+    # classifier = nn.Linear(2*feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.Adam([
@@ -307,14 +290,10 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
             palm_global = cnn_palm(palm_img, return_spatial=False)
             vein_global = cnn_vein(vein_img, return_spatial=False)
-            palm_local = cnn_palm(palm_img, return_spatial=True)
-            vein_local = cnn_vein(vein_img, return_spatial=True)
 
-            fused_feat = fusion_model(
-                palm_global, vein_global, palm_local, vein_local
-            )
+            fused_feat = fusion_model(palm_global, vein_global)
 
-            logits = classifier(fused_feat)
+            logits = classifier(fused_feat, labels)
             loss = ce_loss(logits, labels)
             optimizer.zero_grad()
 
@@ -341,6 +320,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
         cnn_palm.eval()
         cnn_vein.eval()
         fusion_model.eval()
+        classifier.eval()
+
         val_total_loss, val_correct, val_total = 0.0, 0, 0  
         with torch.no_grad():
             val_steps = 0
@@ -351,12 +332,10 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
                 palm_global = cnn_palm(palm_img, return_spatial=False)
                 vein_global = cnn_vein(vein_img, return_spatial=False)
-                palm_local = cnn_palm(palm_img, return_spatial=True)
-                vein_local = cnn_vein(vein_img, return_spatial=True)
 
-                fused_feat = fusion_model(palm_global, vein_global, palm_local, vein_local)
+                fused_feat = fusion_model(palm_global, vein_global)
 
-                logits = classifier(fused_feat)
+                logits = classifier(fused_feat, labels)
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
 

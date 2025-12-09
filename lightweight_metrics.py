@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from thop import profile
-from models.stage1_mobilenet import MobileFaceNet
+from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 
 class FullBiometricSystem(nn.Module):
@@ -75,7 +75,6 @@ def calculate_efficiency():
     print(f"3. Model Size: {Model_Size_MB:.4f} MB ")
     print("="*40)
 
-    # 打印详细分布（可选，帮助你分析哪里重）
     palm_params = sum(p.numel() for p in model.palm_net.parameters()) / 1e6
     fusion_params = sum(p.numel() for p in model.fusion_net.parameters()) / 1e6
     print(f" - single Backbone:   {palm_params:.4f} M")

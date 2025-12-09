@@ -20,7 +20,7 @@ class Config:
     num_workers = 4
     nir_list = "polyu_NIR_list.txt"
     red_list = "polyu_Red_list.txt"
-    phase2_pair_txt = "casia_phase2_train.txt"
+    phase2_pair_txt = "polyu_phase2_test.txt"
     backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
 

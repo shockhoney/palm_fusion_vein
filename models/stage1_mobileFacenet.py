@@ -69,10 +69,7 @@ class Residual(nn.Module):
 
 
 class MobileFaceNet(nn.Module):
-    """
-    MobileFaceNet backbone adapted for variable input resolution.
-    Returns a 256-d embedding, and optionally the last spatial feature map for Stage 2.
-    """
+
     def __init__(self, input_channel=1, input_size=224, embedding_size=256):
         super().__init__()
         self.conv1 = ConvBlock(input_channel, 32, kernel=(3, 3), stride=(2, 2), padding=(1, 1))

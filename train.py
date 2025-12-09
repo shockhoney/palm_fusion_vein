@@ -7,8 +7,8 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
-from models.stage1 import ConvNeXt
-from models.stage1_mobilenet import MobileFaceNet
+from models.stage1 import convnext_tiny
+from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 from utils.head import Arcface_Head
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
@@ -16,20 +16,20 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
+    backbone = 'convnext'  # 'convnext' or 'mobilefacenet' 
 
     input_size = 224
     num_workers = 4
 
     list_file_palm = 'polyu_Red_list.txt'
     list_file_vein = 'polyu_NIR_list.txt'
-    phase2_train = 'polyu_phase2_train.txt'
-    phase2_val = 'polyu_phase2_val.txt'
+    phase2_train = 'casia_phase2_train.txt'
+    phase2_val = 'casia_phase2_val.txt'
 
-    p1_epochs, p1_batch, p1_lr = 120, 32, 1e-3
-    p1_patience = 20
+    p1_epochs, p1_batch, p1_lr = 120, 16, 2e-3
+    p1_patience = 100
     p2_epochs, p2_batch, p2_lr, p2_enc_lr = 100, 16, 1e-4, 1e-5
-    p2_patience = 20
+    p2_patience = 100
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
@@ -38,7 +38,7 @@ def build_backbone(name):
 
     name = name.lower()
     if name == 'convnext':
-        model = ConvNeXt(in_chans=1, depths=[3, 3, 9, 3], dims=[96, 192, 384, 768]).to(config.device)
+        model = convnext_tiny(in_chans=3).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
     elif name in ('mobilefacenet', 'mobile'):
@@ -80,18 +80,19 @@ def get_transforms(img_size, strong=True):
         base += [
             transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2)  
+            # transforms.ColorJitter(brightness=0.2, contrast=0.2)  
         ]
     else:
         base += [
             transforms.RandomRotation(5),
             transforms.RandomAffine(0, translate=(0.05, 0.05))
         ]
-    base += [transforms.Grayscale(num_output_channels=3),transforms.ToTensor(), transforms.Normalize(mean=[0.5], std=[0.5])]
+    base += [transforms.Grayscale(num_output_channels=3),transforms.ToTensor(), transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+]
     return transforms.Compose(base)
 
 def create_dataloaders_from_txt(list_file, batch_size):
-    train_tf = get_transforms(224, strong=True)
+    train_tf = get_transforms(224, strong=False)
     val_tf   = get_transforms(224, strong=False)
 
     train_dataset = TxtImageDataset(list_file=list_file, split="train", transform=train_tf)
@@ -142,16 +143,27 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
-    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=30.0,m=0.20,).to(config.device)
+    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=20.0,m=0.10,).to(config.device)
 
     # classifier = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(classifier.parameters()),
-        lr=config.p1_lr,weight_decay=1e-4)
+    # optimizer = torch.optim.Adam(
+    #     list(model.parameters()) + list(classifier.parameters()),
+    #     lr=config.p1_lr,weight_decay=1e-4)
 
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=[int(0.5 * config.p1_epochs),int(0.75 * config.p1_epochs)], gamma=0.1)
+    # optimizer = torch.optim.SGD(
+    #     list(model.parameters()) + list(classifier.parameters()),
+    #     lr=config.p1_lr, momentum=0.9, weight_decay=1e-4)
+    optimizer = torch.optim.SGD([
+    {'params': model.parameters(), 'lr': config.p1_lr},
+    {'params': classifier.parameters(), 'lr': 10 * config.p1_lr},
+], momentum=0.9, weight_decay=1e-4, nesterov=True)
+
+   # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=[int(0.5 * config.p1_epochs),int(0.75 * config.p1_epochs)], gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=config.p1_epochs
+    )
     early_stop = EarlyStopping(patience=config.p1_patience)
     best_acc = 0.0 
 
@@ -280,7 +292,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
         train_loss, train_correct, train_total = 0.0, 0, 0
 
         pbar = tqdm(total=len(train_loader),
-                    desc=f'[Stage2] Epoch {epoch+1}/{config.p2_epochs}',
+                    desc=f'[Fusion] Epoch {epoch+1}/{config.p2_epochs}',
                     dynamic_ncols=True)
 
         for palm_img, vein_img, labels in train_loader:
@@ -288,10 +300,10 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
             vein_img = vein_img.to(config.device)
             labels = labels.to(config.device)
 
-            palm_global = cnn_palm(palm_img, return_spatial=False)
-            vein_global = cnn_vein(vein_img, return_spatial=False)
+            F_palm = cnn_palm(palm_img, return_spatial=False)
+            F_vein = cnn_vein(vein_img, return_spatial=False)
 
-            fused_feat = fusion_model(palm_global, vein_global)
+            fused_feat = fusion_model(F_palm, F_vein)
 
             logits = classifier(fused_feat, labels)
             loss = ce_loss(logits, labels)
@@ -384,7 +396,7 @@ def main():
     cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
     cnn_vein, _, _ = build_backbone(config.backbone)
 
-    skip_stage1 = True  # 设置为 True 跳过 Stage 1
+    skip_stage1 = False  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
 

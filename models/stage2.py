@@ -87,9 +87,9 @@ class Stage2Fusion(nn.Module):
 
         self.out_dim = out_dim_final
 
-    def forward(self, palm_global: torch.Tensor, vein_global: torch.Tensor):
+    def forward(self, F_palm: torch.Tensor, F_vein: torch.Tensor):
 
-        palm_enhanced, vein_enhanced = self.global_cross_attn(palm_global, vein_global)
+        palm_enhanced, vein_enhanced = self.global_cross_attn(F_palm, F_vein)
         fused_feat = self.global_channel_fusion(palm_enhanced, vein_enhanced)
         fused_feat = self.proj(fused_feat)  
 

@@ -7,16 +7,19 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
+
 from models.stage1 import convnext_tiny
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
+from models import edgenext
+
 from utils.head import Arcface_Head
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'convnext'  # 'convnext' or 'mobilefacenet' 
+    backbone = 'edgenext'  # 'convnext'、'edgenext' or 'mobilefacenet' 
 
     input_size = 224
     num_workers = 4
@@ -45,6 +48,15 @@ def build_backbone(name):
         model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
+    elif name == 'edgenext':
+        model = edgenext.EdgeNeXt(in_chans=3, num_classes=1000,
+                 depths=[3, 3, 9, 3], dims=[24, 48, 88, 168],
+                 global_block=[0, 0, 0, 3], global_block_type=['None', 'None', 'None', 'SDTA'],
+                 drop_path_rate=0., layer_scale_init_value=1e-6, head_init_scale=1., expan_ratio=4,
+                 kernel_sizes=[7, 7, 7, 7], heads=[8, 8, 8, 8], use_pos_embd_xca=[False, False, False, False],
+                 use_pos_embd_global=False, d2_scales=[2, 3, 4, 5]).to(config.device)
+        feat_dim = model.head.in_features
+        local_dim = None
     else:
         raise ValueError(f"Unsupported backbone: {name}")
     return model, feat_dim, local_dim

@@ -9,19 +9,18 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 from models.stage2 import Stage2Fusion
 
 from utils.metrics import compute_eer,roc_auc,tar_at_far,far_frr_acc_at_threshold
-from train import build_backbone,get_transforms
+from train_teacher import build_backbone,get_transforms
 
 class Config:
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    backbone = "mobilefacenet"  
+    device = "cuda" if torch.cuda.is_available() else "cpu" 
     input_size = 224
     batch_size = 32
     num_workers = 4
     nir_list = "polyu_NIR_list.txt"
     red_list = "polyu_Red_list.txt"
     phase2_pair_txt = "polyu_phase2_test.txt"
-    backbone = 'mobilefacenet'  # 'convnext' or 'mobilefacenet'
+    backbone = 'edgenext'  # 'edgenext' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
 
 

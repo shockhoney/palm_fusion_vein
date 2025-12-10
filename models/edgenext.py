@@ -54,10 +54,14 @@ class EdgeNeXt(nn.Module):
             self.stages.append(nn.Sequential(*stage_blocks))
             cur += depths[i]
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6)  # Final norm layer
+        self.out_dim = dims[-1]
+        self.local_dim = None
+
         self.head = nn.Linear(dims[-1], num_classes)
 
         self.apply(self._init_weights)
-        self.head_dropout = nn.Dropout(kwargs["classifier_dropout"])
+        classifier_dropout = kwargs.get("classifier_dropout", 0.0)    
+        self.head_dropout = nn.Dropout(classifier_dropout)
         self.head.weight.data.mul_(head_init_scale)
         self.head.bias.data.mul_(head_init_scale)
 
@@ -82,7 +86,11 @@ class EdgeNeXt(nn.Module):
 
         return self.norm(x.mean([-2, -1]))  # Global average pooling, (N, C, H, W) -> (N, C)
 
-    def forward(self, x):
+    def forward(self, x,return_spatial=False,with_head=False):
         x = self.forward_features(x)
-        x = self.head(self.head_dropout(x))
-        return x
+        if with_head:
+            logits = self.head(self.head_dropout(x))
+            return logits
+        if return_spatial:
+            return x
+        return x  # (N,C)

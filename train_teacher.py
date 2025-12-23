@@ -15,7 +15,7 @@ from models import edgenext
 
 from utils.head import Arcface_Head
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
-
+ 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'

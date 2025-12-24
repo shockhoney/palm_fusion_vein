@@ -13,7 +13,7 @@ from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 from models import edgenext
 
-from utils.head import Arcface_Head
+from utils.head import Arcface_Head 
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
 class Config:
@@ -36,7 +36,7 @@ class Config:
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
-
+#backbone
 def build_backbone(name):
 
     name = name.lower()

@@ -1,3 +1,5 @@
+#此脚本为测试脚本，用于训练阶段2的学生模型，采用联合蒸馏方法
+
 import warnings
 warnings.filterwarnings('ignore')
 

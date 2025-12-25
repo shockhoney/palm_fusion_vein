@@ -19,32 +19,27 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'edgenext'  # 'edgenext' or 'mobilefacenet' 
+    backbone = 'mobilefacenet'  # 'edgenext' or 'mobilefacenet' 
 
     input_size = 224
-    num_workers = 4
+    num_workers = 8
 
-    list_file_palm = 'polyu_Red_list.txt'
-    list_file_vein = 'polyu_NIR_list.txt'
-    phase2_train = 'polyu_phase2_train.txt'
-    phase2_val = 'polyu_phase2_val.txt'
+    list_file_palm = 'txt-datasets/polyu__NIR_list.txt'
+    list_file_vein = 'txt-datasets/polyu__NIR_list.txt'
+    phase2_train = 'txt-datasets/polyu_phase2_train.txt'
+    phase2_val = 'txt-datasets/polyu_phase2_val.txt'
 
-    p1_epochs, p1_batch, p1_lr = 120, 16, 1e-3
-    p1_patience = 100
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 100, 16, 1e-4, 1e-5
-    p2_patience = 20
+    p1_epochs, p1_batch, p1_lr = 200, 32, 1e-3
+    p1_patience = 150
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 150, 32, 1e-4, 1e-5
+    p2_patience = 150
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
-#backbone
-def build_backbone(name):
 
+def build_backbone(name):
     name = name.lower()
-    if name == 'convnext':
-        model = convnext_tiny(in_chans=3).to(config.device)
-        feat_dim = model.out_dim
-        local_dim = model.local_dim
-    elif name in ('mobilefacenet', 'mobile'):
+    if name == 'mobilefacenet':
         model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
@@ -52,8 +47,8 @@ def build_backbone(name):
         model = edgenext.EdgeNeXt(in_chans=3, num_classes=500,
                  depths=[3, 3, 9, 3], dims=[24, 48, 88, 168],
                  global_block=[0, 0, 0, 3], global_block_type=['None', 'None', 'None', 'SDTA'],
-                 drop_path_rate=0., layer_scale_init_value=1e-6, head_init_scale=1., expan_ratio=4,
-                 kernel_sizes=[7, 7, 7, 7], heads=[8, 8, 8, 8], use_pos_embd_xca=[False, False, False, False],
+                 drop_path_rate=0.2, layer_scale_init_value=1e-6, head_init_scale=1., expan_ratio=4,
+                 kernel_sizes=[7, 7, 7, 7], heads=[4, 4, 4, 4], use_pos_embd_xca=[False, False, False, False],
                  use_pos_embd_global=False, d2_scales=[2, 3, 4, 5]).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
@@ -92,7 +87,7 @@ def get_transforms(img_size, strong=True):
         base += [
             transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
-            # transforms.ColorJitter(brightness=0.2, contrast=0.2)  
+           # transforms.ColorJitter(brightness=0.2, contrast=0.2)  
         ]
     else:
         base += [
@@ -140,9 +135,7 @@ def create_phase2_dataloaders(train_list, val_list, batch_size):
         shuffle=False,
         num_workers=config.num_workers
     )
-
     return train_loader, val_loader, num_classes
-
 
 
 def train_phase1(model, config, writer, model_name, feat_dim):
@@ -155,23 +148,21 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
-    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=20.0,m=0.10,).to(config.device)
+    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=20.0,m=0.10).to(config.device)
 
     # classifier = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(classifier.parameters()),
-        lr=config.p1_lr,weight_decay=1e-4)
-
-    # optimizer = torch.optim.SGD(
+    # optimizer = torch.optim.Adam(
     #     list(model.parameters()) + list(classifier.parameters()),
-    #     lr=config.p1_lr, momentum=0.9, weight_decay=1e-4)
+    #     lr=config.p1_lr,weight_decay=1e-4)
 
-   # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=[int(0.5 * config.p1_epochs),int(0.75 * config.p1_epochs)], gamma=0.1)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=config.p1_epochs
-    )
+    optimizer = torch.optim.SGD(
+        list(model.parameters()) + list(classifier.parameters()),
+        lr=config.p1_lr, momentum=0.9, weight_decay=1e-4)
+
+    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,milestones=[int(0.5 * config.p1_epochs),int(0.75 * config.p1_epochs)], gamma=0.1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p1_epochs)
     early_stop = EarlyStopping(patience=config.p1_patience)
     best_acc = 0.0 
 

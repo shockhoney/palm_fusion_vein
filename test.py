@@ -17,10 +17,10 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "polyu_NIR_list.txt"
-    red_list = "polyu_Red_list.txt"
-    phase2_pair_txt = "polyu_phase2_test.txt"
-    backbone = 'edgenext'  # 'edgenext' or 'mobilefacenet'
+    nir_list = "txt-datasets/polyu__NIR_list.txt"
+    red_list = "txt-datasets/polyu__Red_list.txt"
+    phase2_pair_txt = "txt-datasets/polyu_phase2_test.txt"
+    backbone = 'mobilefacenet'  # 'edgenext' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
 
 

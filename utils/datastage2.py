@@ -98,8 +98,8 @@ def generate_phase2_lists(palm_file, vein_file, out_train, out_val, out_test=Non
 
 if __name__ == '__main__':
     # 配置文件路径
-    PALM_LIST = 'polyu_Red_list.txt'
-    VEIN_LIST = 'polyu_NIR_list.txt'
+    PALM_LIST = '/root/autodl-tmp/txt-datasets/polyu__Red_list.txt'
+    VEIN_LIST = '/root/autodl-tmp/txt-datasets/polyu__NIR_list.txt'
     
     # 输出文件路径
     OUTPUT_TRAIN = 'polyu_phase2_train.txt'

@@ -8,10 +8,10 @@ from .conv_encoder import ConvEncoder
 
 class EdgeNeXt(nn.Module):
     def __init__(self, in_chans=3, num_classes=1000,
-                 depths=[3, 3, 9, 3], dims=[24, 48, 88, 168],
+                 depths=[2, 2, 6, 2], dims=[24, 48, 88, 168],
                  global_block=[0, 0, 0, 3], global_block_type=['None', 'None', 'None', 'SDTA'],
                  drop_path_rate=0., layer_scale_init_value=1e-6, head_init_scale=1., expan_ratio=4,
-                 kernel_sizes=[7, 7, 7, 7], heads=[8, 8, 8, 8], use_pos_embd_xca=[False, False, False, False],
+                 kernel_sizes=[7, 7, 7, 7], heads=[4, 4, 4, 4], use_pos_embd_xca=[False, False, False, False],
                  use_pos_embd_global=False, d2_scales=[2, 3, 4, 5], **kwargs):
         super().__init__()
         for g in global_block_type:

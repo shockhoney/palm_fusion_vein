@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
 
-from models.stage1 import convnext_tiny
+from models.student_mobilefacenet import SmallMobileFaceNet, TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 from models import edgenext
@@ -50,6 +50,10 @@ def build_backbone(name):
                  drop_path_rate=0.2, layer_scale_init_value=1e-6, head_init_scale=1., expan_ratio=4,
                  kernel_sizes=[7, 7, 7, 7], heads=[4, 4, 4, 4], use_pos_embd_xca=[False, False, False, False],
                  use_pos_embd_global=False, d2_scales=[2, 3, 4, 5]).to(config.device)
+        feat_dim = model.out_dim
+        local_dim = model.local_dim
+    elif name =='tiny_mobilefacenet':
+        model = TinyMobileFaceNet(input_channel=3, embedding_size=256).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
     else:

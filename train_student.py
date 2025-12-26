@@ -1,5 +1,3 @@
-#此脚本为测试脚本，用于训练阶段2的学生模型，采用联合蒸馏方法
-
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -10,23 +8,16 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-# 直接复用 train.py 里的配置和工具函数
+from utils.kd_loss import total_loss
 from train_teacher import config, build_backbone, create_phase2_dataloaders, EarlyStopping
 from models.stage2 import Stage2Fusion
 from utils.head import Arcface_Head
 
 
 def build_stage2_teacher():
-    """
-    从 outputs/models/stage2_best.pth 构建并加载 Teacher:
-    - cnn_palm_T: Edgenext 掌纹
-    - cnn_vein_T: Edgenext 掌静脉
-    - fusion_T : Stage2Fusion
-    """
-    # Edgenext backbone 作为 teacher
-    cnn_palm_T, feat_dim_T, _ = build_backbone('edgenext')
-    cnn_vein_T, _, _           = build_backbone('edgenext')
 
+    cnn_palm_T, feat_dim_T, _ = build_backbone('mobilefacenet')
+    cnn_vein_T, _, _           = build_backbone('mobilefacenet')
     fusion_T = Stage2Fusion(
         in_dim_global=feat_dim_T,
         out_dim_final=512,
@@ -56,32 +47,26 @@ def build_stage2_teacher():
 def train_joint_distill(log_dir='runs_distill'):
     """
     两阶段联合蒸馏：
-    Teacher: Edgenext + Stage2Fusion (from stage2_best.pth)
-    Student: MobileFaceNet + Stage2Fusion + ArcFace Head
+    Teacher: mobilefacenet + Stage2Fusion (from stage2_best.pth)
+    Student: 轻量版MobileFaceNet + Stage2Fusion + ArcFace Head
     """
     writer = SummaryWriter(log_dir=log_dir)
 
-    # ---------- 1. Teacher ----------
     cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T = build_stage2_teacher()
 
-    # ---------- 2. Student ----------
-    # 两个 MobileFaceNet 分支
-    cnn_palm_S, feat_dim_S, _ = build_backbone('mobilefacenet')
-    cnn_vein_S, _, _          = build_backbone('mobilefacenet')
+    # ----------  学生模型加载 ----------
+    cnn_palm_S, feat_dim_S, _ = build_backbone('tiny_mobilefacenet')
+    cnn_vein_S, _, _          = build_backbone('tiny_mobilefacenet')
 
-    # 学生 Stage2 融合
     fusion_S = Stage2Fusion(
         in_dim_global=feat_dim_S,
         out_dim_final=512,
         final_l2norm=True
     ).to(config.device)
 
-    # Phase2 成对 dataloader
     train_loader, val_loader, num_classes = create_phase2_dataloaders(
-        config.phase2_train, config.phase2_val, config.p2_batch
-    )
+        config.phase2_train, config.phase2_val, config.p2_batch)
 
-    # 学生分类头（和原 Stage2 保持一致超参）
     classifier_S = Arcface_Head(
         embedding_size=512,
         num_classes=num_classes,
@@ -89,7 +74,6 @@ def train_joint_distill(log_dir='runs_distill'):
         m=0.20,
     ).to(config.device)
 
-    # ---------- 3. 优化器 / scheduler ----------
     params = [
         {'params': cnn_palm_S.parameters(), 'lr': config.p2_enc_lr},
         {'params': cnn_vein_S.parameters(), 'lr': config.p2_enc_lr},
@@ -98,13 +82,13 @@ def train_joint_distill(log_dir='runs_distill'):
     ]
     optimizer = torch.optim.Adam(params, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config.p2_epochs
-    )
+        optimizer, T_max=config.p2_epochs)
 
     ce_loss  = nn.CrossEntropyLoss()
-    mse_loss = nn.MSELoss()
+    # mse_loss = nn.MSELoss()
+    
 
-    beta_kd = 1.0    # 融合特征蒸馏权重，可以根据效果调整
+    beta_kd = 0.85    # 融合特征蒸馏权重，可以根据效果调整
 
     early_stop = EarlyStopping(patience=config.p2_patience)
     best_acc = 0.0
@@ -141,14 +125,13 @@ def train_joint_distill(log_dir='runs_distill'):
 
             logits_S = classifier_S(fused_S, labels)
 
-            # ---------- Loss ----------
-            # 1) 分类 loss
             loss_ce = ce_loss(logits_S, labels)
 
             # 2) 融合特征蒸馏 loss
             loss_kd = mse_loss(fused_S_n, fused_T_n)
 
             loss = loss_ce + beta_kd * loss_kd
+            # loss = total_loss(fused_S_n, fused_T_n) * beta_kd
 
             optimizer.zero_grad()
             loss.backward()
@@ -208,7 +191,6 @@ def train_joint_distill(log_dir='runs_distill'):
         writer.add_scalar('JointDistill/ValLoss',   avg_val_loss,   epoch)
         writer.add_scalar('JointDistill/ValAcc',    avg_val_acc,    epoch)
 
-        # 保存最优学生模型
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
             torch.save({
@@ -217,9 +199,7 @@ def train_joint_distill(log_dir='runs_distill'):
                 'fusion_S': fusion_S.state_dict(),
                 'classifier_S': classifier_S.state_dict(),
             }, os.path.join(config.save_dir, 'stage2_student_joint_best.pth'))
-            print(f"  >>> New best student model saved. ValAcc={best_acc:.2f}%")
 
-        # 提前停止
         if early_stop(-avg_val_acc, mode='min'):
             print(f"[JointDistill] Early stopping at epoch {epoch+1}")
             break

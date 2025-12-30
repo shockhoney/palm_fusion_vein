@@ -19,7 +19,6 @@ class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
     backbone = 'mobilefacenet'  # 'tiny_mobilefacenet'   or 'mobilefacenet' 
-tiny_
     input_size = 224
     num_workers = 8
 

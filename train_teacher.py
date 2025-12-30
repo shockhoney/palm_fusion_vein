@@ -11,7 +11,6 @@ from tqdm import tqdm
 from models.student_mobilefacenet import SmallMobileFaceNet, TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
-from models import edgenext
 
 from utils.head import Arcface_Head 
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
@@ -19,8 +18,8 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'mobilefacenet'  # 'edgenext' or 'mobilefacenet' 
-
+    backbone = 'mobilefacenet'  # 'tiny_mobilefacenet'   or 'mobilefacenet' 
+tiny_
     input_size = 224
     num_workers = 8
 
@@ -41,15 +40,6 @@ def build_backbone(name):
     name = name.lower()
     if name == 'mobilefacenet':
         model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
-        feat_dim = model.out_dim
-        local_dim = model.local_dim
-    elif name == 'edgenext':
-        model = edgenext.EdgeNeXt(in_chans=3, num_classes=500,
-                 depths=[3, 3, 9, 3], dims=[24, 48, 88, 168],
-                 global_block=[0, 0, 0, 3], global_block_type=['None', 'None', 'None', 'SDTA'],
-                 drop_path_rate=0.2, layer_scale_init_value=1e-6, head_init_scale=1., expan_ratio=4,
-                 kernel_sizes=[7, 7, 7, 7], heads=[4, 4, 4, 4], use_pos_embd_xca=[False, False, False, False],
-                 use_pos_embd_global=False, d2_scales=[2, 3, 4, 5]).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
     elif name =='tiny_mobilefacenet':

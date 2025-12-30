@@ -194,11 +194,11 @@ def train_joint_distill(log_dir='runs_distill'):
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
             torch.save({
-                'cnn_palm_S': cnn_palm_S.state_dict(),
-                'cnn_vein_S': cnn_vein_S.state_dict(),
-                'fusion_S': fusion_S.state_dict(),
-                'classifier_S': classifier_S.state_dict(),
-            }, os.path.join(config.save_dir, 'stage2_student_joint_best.pth'))
+                'cnn_palm': cnn_palm_S.state_dict(),
+                'cnn_vein': cnn_vein_S.state_dict(),
+                'fusion': fusion_S.state_dict(),
+                'classifier': classifier_S.state_dict(),
+            }, os.path.join(config.save_dir, 'distill_best.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"[JointDistill] Early stopping at epoch {epoch+1}")

@@ -29,7 +29,7 @@ class Config:
 
     p1_epochs, p1_batch, p1_lr = 200, 32, 1e-3
     p1_patience = 150
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 150, 32, 1e-4, 1e-5
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 170, 32, 1e-4, 1e-5
     p2_patience = 150
 
 config = Config()

@@ -176,8 +176,8 @@ class PairTxtDataset(Dataset):
 #     phase2_list(root_dir, train_txt, val_txt, val_ratio=0.2)
 
 if __name__ == '__main__':
-     gen_polyu_list("/root/autodl-tmp/palm_fusion_vein/data/PolyU/Red",
-    out_txt="polyu__Red_list.txt",
+     gen_polyu_list("/home/devops/works/pvf/palm_fusion_vein/data/PolyU/NIR",
+    out_txt="polyu__NIR_list.txt",
     train_ratio=0.8,
     val_ratio=0.1,
     seed=42)

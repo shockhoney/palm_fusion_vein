@@ -177,7 +177,7 @@ class PairTxtDataset(Dataset):
 
 if __name__ == '__main__':
      gen_polyu_list("/home/devops/works/pvf/palm_fusion_vein/data/PolyU/NIR",
-    out_txt="polyu__NIR_list.txt",
+    out_txt="polyu__Red_list.txt",
     train_ratio=0.8,
     val_ratio=0.1,
     seed=42)

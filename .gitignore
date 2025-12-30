@@ -9,7 +9,7 @@ utils/file_processing/
 .vscode/
 utils/__pycache__/
 #checkpoints
-outputs/models/ 
+# outputs/models/ 
 
 #txtfiles
 *.txt

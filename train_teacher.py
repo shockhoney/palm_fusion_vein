@@ -27,10 +27,10 @@ class Config:
     phase2_train = 'txt-datasets/polyu_phase2_train.txt'
     phase2_val = 'txt-datasets/polyu_phase2_val.txt'
 
-    p1_epochs, p1_batch, p1_lr = 200, 32, 1e-3
-    p1_patience = 150
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 170, 32, 1e-4, 1e-5
-    p2_patience = 150
+    p1_epochs, p1_batch, p1_lr = 200, 16, 1e-3
+    p1_patience = 20
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 16, 1e-4, 1e-5
+    p2_patience = 20
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
@@ -388,7 +388,7 @@ def main():
     cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
     cnn_vein, _, _ = build_backbone(config.backbone)
 
-    skip_stage1 = True  # 设置为 True 跳过 Stage 1
+    skip_stage1 = False  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
 

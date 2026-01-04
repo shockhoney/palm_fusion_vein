@@ -66,6 +66,21 @@ class Residual(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+class ECA(nn.Module):
+    def __init__(self, channels, k_size=5):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # x: [B,C,H,W]
+        y = self.avg_pool(x)                     # [B,C,1,1]
+        y = y.squeeze(-1).transpose(1, 2)        # [B,1,C]
+        y = self.conv(y)                         # [B,1,C]
+        y = self.sigmoid(y).transpose(1, 2).unsqueeze(-1)  # [B,C,1,1]
+        return x * y
+
 
 class SmallMobileFaceNet(nn.Module):
     """
@@ -120,6 +135,7 @@ class TinyMobileFaceNet(nn.Module):
         self.conv_45 = DepthWise(32, 32, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=128)
         self.conv_5 = Residual(32, num_block=1, groups=64)
         self.conv_6_sep = ConvBlock(32, embedding_size, kernel=(1, 1), stride=(1, 1), padding=(0, 0))
+        self.eca = ECA(embedding_size, k_size=5)
 
         self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.bn = nn.BatchNorm1d(embedding_size)
@@ -137,7 +153,7 @@ class TinyMobileFaceNet(nn.Module):
         x = self.conv_45(x)
         x = self.conv_5(x)
         feat_map = self.conv_6_sep(x)
-
+        feat_map = self.eca(feat_map)
         emb = self.global_pool(feat_map).flatten(1)
         emb = self.bn(emb)
         return feat_map if return_spatial else emb

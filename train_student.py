@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-
+from models.student_fusion import Stage2FusionStudent_BottleneckGate    
 from utils.kd_loss import total_loss
 from train_teacher import config, build_backbone, create_phase2_dataloaders, EarlyStopping
 from models.stage2 import Stage2Fusion
@@ -58,11 +58,10 @@ def train_joint_distill(log_dir='runs_distill'):
     cnn_palm_S, feat_dim_S, _ = build_backbone('tiny_mobilefacenet')
     cnn_vein_S, _, _          = build_backbone('tiny_mobilefacenet')
 
-    fusion_S = Stage2Fusion(
-        in_dim_global=feat_dim_S,
-        out_dim_final=512,
-        final_l2norm=True
-    ).to(config.device)
+    fusion_S = Stage2FusionStudent_BottleneckGate(
+        in_dim_global=feat_dim_S, out_dim_final=512,
+        bottleneck=128, gate_hidden=32, final_l2norm=True).to(config.device)
+
 
     train_loader, val_loader, num_classes = create_phase2_dataloaders(
         config.phase2_train, config.phase2_val, config.p2_batch)

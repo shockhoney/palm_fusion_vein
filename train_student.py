@@ -43,25 +43,23 @@ def build_stage2_teacher():
     print(f"==> Loaded teacher from {ckpt_path}")
     return cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T
 
+def kd_cosine(s, t):
+    s = F.normalize(s, dim=1)
+    t = F.normalize(t, dim=1)
+    return (1.0 - (s * t).sum(dim=1)).mean()
+
 
 def train_joint_distill(log_dir='runs_distill'):
-    """
-    两阶段联合蒸馏：
-    Teacher: mobilefacenet + Stage2Fusion (from stage2_best.pth)
-    Student: 轻量版MobileFaceNet + Stage2Fusion + ArcFace Head
-    """
-    writer = SummaryWriter(log_dir=log_dir)
 
+    writer = SummaryWriter(log_dir=log_dir)
     cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T = build_stage2_teacher()
 
-    # ----------  学生模型加载 ----------
     cnn_palm_S, feat_dim_S, _ = build_backbone('tiny_mobilefacenet')
     cnn_vein_S, _, _          = build_backbone('tiny_mobilefacenet')
 
     fusion_S = Stage2FusionStudent_BottleneckGate(
         in_dim_global=feat_dim_S, out_dim_final=512,
         bottleneck=128, gate_hidden=32, final_l2norm=True).to(config.device)
-
 
     train_loader, val_loader, num_classes = create_phase2_dataloaders(
         config.phase2_train, config.phase2_val, config.p2_batch)
@@ -123,14 +121,14 @@ def train_joint_distill(log_dir='runs_distill'):
             fused_S_n = F.normalize(fused_S, p=2, dim=1)
 
             logits_S = classifier_S(fused_S, labels)
-
+            # ---------- 计算损失 ----------
             loss_ce = ce_loss(logits_S, labels)
+            loss_kd_fuse = kd_cosine(fused_S, fused_T)
+            loss_kd_palm = kd_cosine(F_palm_S, F_palm_T)
+            loss_kd_vein = kd_cosine(F_vein_S, F_vein_T)
 
-            # 2) 融合特征蒸馏 loss
-            loss_kd = mse_loss(fused_S_n, fused_T_n)
-
+            loss_kd = 1.0 * loss_kd_fuse + 0.5 * (loss_kd_palm + loss_kd_vein)
             loss = loss_ce + beta_kd * loss_kd
-            # loss = total_loss(fused_S_n, fused_T_n) * beta_kd
 
             optimizer.zero_grad()
             loss.backward()

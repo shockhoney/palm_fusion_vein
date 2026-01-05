@@ -392,8 +392,8 @@ def main():
 
     if not skip_stage1:
 
-        # palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', feat_dim)
-        # print(f" Palm(Best Acc: {palm_acc:.2f}%)")
+        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', feat_dim)
+        print(f" Palm(Best Acc: {palm_acc:.2f}%)")
         vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', feat_dim)
         print(f" Vein(Best Acc: {vein_acc:.2f}%)")
 

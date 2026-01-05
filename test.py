@@ -108,7 +108,7 @@ def main():
     fusion_model = Stage2FusionStudent_BottleneckGate(
               in_dim_global=feat_dim,  # 通常=256
                   out_dim_final=512,
-                      bottleneck=128,            # 你选128就一直保持
+                      bottleneck=128,            # 选128就一直保持
                           gate_hidden=32,
                               final_l2norm=True
                               ).to(device)

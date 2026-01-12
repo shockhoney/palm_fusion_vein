@@ -4,6 +4,8 @@ from thop import profile
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 from models.student_mobilefacenet import TinyMobileFaceNet
+from models.student_fusion import Stage2FusionStudent_BottleneckGate 
+
 class FullBiometricSystem(nn.Module):
     def __init__(self, input_size=224, embed_dim=256):
         super(FullBiometricSystem, self).__init__()
@@ -11,7 +13,7 @@ class FullBiometricSystem(nn.Module):
         self.vein_net =TinyMobileFaceNet(input_channel=3, embedding_size=embed_dim)
        # self.palm_net = MobileFaceNet(input_channel=3,input_size=input_size,embedding_size=embed_dim)
        # self.vein_net = MobileFaceNet(input_channel=3,input_size=input_size,embedding_size=embed_dim)
-        self.fusion_net = Stage2Fusion(in_dim_global=embed_dim, out_dim_final=512)
+        self.fusion_net = Stage2FusionStudent_BottleneckGate(in_dim_global=embed_dim, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True)     
 
     def forward(self, img_palm, img_vein):
         feat_palm = self.palm_net(img_palm, return_spatial=False)

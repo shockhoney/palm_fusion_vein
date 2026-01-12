@@ -8,7 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
 
-from models.student_mobilefacenet import SmallMobileFaceNet, TinyMobileFaceNet
+from models.student_mobilefacenet import  TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 

@@ -1,20 +1,13 @@
 import warnings
 warnings.filterwarnings('ignore')
-
 import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# VkD: orthogonal projection (fallback if PyTorch is old)
-try:
-    from torch.nn.utils.parametrizations import orthogonal
-except Exception:
-    orthogonal = None
+from torch.nn.utils.parametrizations import orthogonal
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from models.student_fusion import Stage2FusionStudent_BottleneckGate    
-from utils.kd_loss import total_loss
 from train_teacher import config, build_backbone, create_phase2_dataloaders, EarlyStopping
 from models.stage2 import Stage2Fusion
 from utils.head import Arcface_Head

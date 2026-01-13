@@ -23,15 +23,15 @@ class Config:
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'txt-datasets/polyu__NIR_list.txt'
+    list_file_palm = 'txt-datasets/polyu__Red_list.txt'
     list_file_vein = 'txt-datasets/polyu__NIR_list.txt'
     phase2_train = 'txt-datasets/polyu_phase2_train.txt'
     phase2_val = 'txt-datasets/polyu_phase2_val.txt'
 
     p1_epochs, p1_batch, p1_lr = 200, 16, 1e-3
-    p1_patience = 20
+    p1_patience = 50
     p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 16, 1e-4, 1e-5
-    p2_patience = 20
+    p2_patience = 50
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
@@ -81,14 +81,14 @@ def get_transforms(img_size, strong=True):
         base += [
             transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
-           # transforms.ColorJitter(brightness=0.2, contrast=0.2)  
+            transforms.ColorJitter(brightness=0.2, contrast=0.2)  
         ]
     else:
         base += [
             transforms.RandomRotation(5),
             transforms.RandomAffine(0, translate=(0.05, 0.05))
         ]
-    base += [transforms.Grayscale(num_output_channels=3),transforms.ToTensor(), transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    base += [transforms.ToTensor(), transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ]
     return transforms.Compose(base)
 
@@ -142,7 +142,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
-    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=20.0,m=0.10).to(config.device)
+    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=32.0,m=0.30).to(config.device)
 
     # classifier = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()

@@ -2,7 +2,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
-import math
+from typing import Dict, List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,10 +25,7 @@ except Exception:
 
 
 def make_orth_linear(in_dim: int, out_dim: int, bias: bool = False) -> nn.Module:
-    """VkD-style projector.
-    - Prefer orthogonal parametrization when available.
-    - Fallback: orthogonal init only (still stable, but not strictly constrained).
-    """
+    """VkD-style projector with orthogonal parametrization when supported."""
     lin = nn.Linear(in_dim, out_dim, bias=bias)
     nn.init.orthogonal_(lin.weight)
     if lin.bias is not None:
@@ -37,24 +35,13 @@ def make_orth_linear(in_dim: int, out_dim: int, bias: bool = False) -> nn.Module
     return lin
 
 
-def vkd_repr_loss(student_feat: torch.Tensor,
-                  teacher_feat: torch.Tensor,
-                  layernorm_teacher: bool = True) -> torch.Tensor:
-    """Representation distillation used in VkD classification code:
-    teacher-side task norm (LayerNorm), SmoothL1 for robustness.
-    """
-    if layernorm_teacher:
-        teacher_feat = F.layer_norm(teacher_feat, (teacher_feat.shape[1],))
-    return F.smooth_l1_loss(student_feat, teacher_feat)
-
-
 def vkd_feature_loss(s: torch.Tensor,
                      t: torch.Tensor,
                      teacher_ln: bool = True,
                      normalize: bool = True) -> torch.Tensor:
-    """Feature distillation helper:
-    - optional LayerNorm on teacher (task-specific normalization)
-    - optional L2 normalization before SmoothL1 (directional alignment, stable)
+    """VkD-like distillation:
+    - task-specific normalization on teacher (LayerNorm)
+    - (optional) L2-normalize then SmoothL1 for stable alignment
     """
     if teacher_ln:
         t = F.layer_norm(t, (t.shape[1],))
@@ -62,6 +49,62 @@ def vkd_feature_loss(s: torch.Tensor,
         s = F.normalize(s, dim=1)
         t = F.normalize(t, dim=1)
     return F.smooth_l1_loss(s, t)
+
+
+def vkd_repr_loss(s: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """VkD repr distill (teacher LN + SmoothL1)."""
+    t = F.layer_norm(t, (t.shape[1],))
+    return F.smooth_l1_loss(s, t)
+
+
+def topk_accuracy(logits: torch.Tensor, target: torch.Tensor, k: int = 5) -> float:
+    """Compute top-k accuracy in percent."""
+    with torch.no_grad():
+        k = min(k, logits.size(1))
+        _, pred = logits.topk(k, dim=1, largest=True, sorted=True)
+        correct = pred.eq(target.view(-1, 1)).any(dim=1).float().mean().item()
+        return 100.0 * correct
+
+
+def parse_label_ids_from_txt(txt_path: str) -> List[int]:
+    """Parse label ids from dataset txt file.
+    Assumption (robust): label id is the last whitespace-separated token of each non-empty line.
+    """
+    ids: List[int] = []
+    if (txt_path is None) or (not os.path.exists(txt_path)):
+        return ids
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            try:
+                ids.append(int(parts[-1]))
+            except Exception:
+                continue
+    return ids
+
+
+def build_label_mapping(train_txt: str, val_txt: str) -> Dict[int, int]:
+    """Build a stable mapping from raw label ids -> [0..C-1] using train+val txt files.
+    This prevents 'acc always 0' caused by non-contiguous / inconsistent label indices.
+    """
+    train_ids = parse_label_ids_from_txt(train_txt)
+    val_ids = parse_label_ids_from_txt(val_txt)
+    all_ids = sorted(set(train_ids + val_ids))
+    if len(all_ids) == 0:
+        return {}
+    return {raw: i for i, raw in enumerate(all_ids)}
+
+
+def remap_labels(labels: torch.Tensor, mapping: Dict[int, int]) -> torch.Tensor:
+    """Remap label tensor using mapping. If mapping is empty, return as-is."""
+    if not mapping:
+        return labels
+    lbl = labels.detach().to("cpu").tolist()
+    mapped = [mapping[int(x)] for x in lbl]
+    return torch.tensor(mapped, device=labels.device, dtype=labels.dtype)
 
 
 def build_stage2_teacher():
@@ -82,7 +125,6 @@ def build_stage2_teacher():
     cnn_vein_T.load_state_dict(ckpt['cnn_vein'])
     fusion_T.load_state_dict(ckpt['fusion'])
 
-    # freeze teacher
     for m in [cnn_palm_T, cnn_vein_T, fusion_T]:
         m.to(config.device)
         m.eval()
@@ -93,12 +135,13 @@ def build_stage2_teacher():
     return cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T
 
 
-def train_joint_distill(log_dir='runs_distill_vkd_opt'):
+def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
     writer = SummaryWriter(log_dir=log_dir)
 
-    # ---------------- Teacher & Student ----------------
+    # --------- teacher ----------
     cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T = build_stage2_teacher()
 
+    # --------- student ----------
     cnn_palm_S, feat_dim_S, _ = build_backbone('tiny_mobilefacenet')
     cnn_vein_S, _, _          = build_backbone('tiny_mobilefacenet')
 
@@ -107,11 +150,21 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
         bottleneck=128, gate_hidden=32, final_l2norm=True
     ).to(config.device)
 
-    train_loader, val_loader, num_classes = create_phase2_dataloaders(
+    train_loader, val_loader, num_classes_from_loader = create_phase2_dataloaders(
         config.phase2_train, config.phase2_val, config.p2_batch
     )
 
-    # ArcFace head (train uses margin; eval will temporarily set m=0)
+    # ========== 关键修复：构建稳定的 label remap ==========
+    label_map = build_label_mapping(config.phase2_train, config.phase2_val)
+    if label_map:
+        num_classes = len(label_map)
+        raw_ids = sorted(label_map.keys())
+        print(f"[LabelMap] enabled: raw label range [{raw_ids[0]}..{raw_ids[-1]}], mapped classes={num_classes}")
+    else:
+        num_classes = num_classes_from_loader
+        print(f"[LabelMap] disabled (fallback). num_classes(from loader)={num_classes}")
+
+    # --------- ArcFace head ----------
     target_margin = 0.10
     classifier_S = Arcface_Head(
         embedding_size=512,
@@ -120,29 +173,24 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
         m=target_margin,
     ).to(config.device)
 
-    # ---------------- VkD: capture pre-proj representations via hooks ----------------
-    # teacher: fusion_T.proj input  -> 256-d fused representation before proj
-    # student: fusion_S.proj input  -> 128-d bottleneck fused representation before proj
+    # --------- hooks for pre-proj repr distill ----------
     cache_t, cache_s = {}, {}
 
     def hook_t(module, inputs, output):
-        cache_t['preproj'] = inputs[0]
+        cache_t['preproj'] = inputs[0]  # [B, 256]
 
     def hook_s(module, inputs, output):
-        cache_s['preproj'] = inputs[0]
+        cache_s['preproj'] = inputs[0]  # [B, 128]
 
     h_t = fusion_T.proj.register_forward_hook(hook_t)
     h_s = fusion_S.proj.register_forward_hook(hook_s)
 
-    # ---------------- VkD projectors ----------------
-    # representation distillation projector: 128 -> 256
+    # --------- projectors ----------
     proj_preproj = make_orth_linear(128, 256, bias=False).to(config.device)
-    # feature distillation projectors (align dims, optional but usually stabilizes KD)
     proj_palm = make_orth_linear(feat_dim_S, feat_dim_T, bias=False).to(config.device)
     proj_vein = make_orth_linear(feat_dim_S, feat_dim_T, bias=False).to(config.device)
 
-    # ---------------- Optimizer & sched ----------------
-    # 关键：让 projector 的 lr 更小更稳（类似 VkD 中 projector 是辅助项）
+    # --------- optimizer ----------
     params = [
         {'params': cnn_palm_S.parameters(), 'lr': config.p2_enc_lr},
         {'params': cnn_vein_S.parameters(), 'lr': config.p2_enc_lr},
@@ -153,27 +201,20 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
         {'params': proj_vein.parameters(),  'lr': config.p2_lr * 0.1, 'weight_decay': 0.0},
     ]
     optimizer = torch.optim.Adam(params, weight_decay=1e-4)
-
-    # per-epoch cosine (保持你原有风格，最小改动)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
     ce_loss = nn.CrossEntropyLoss()
 
-    # ---------------- Training strategy (关键优化点) ----------------
-    # 1) 先让 student 用 CE “站稳”几轮（否则蒸馏很容易把随机网络拉偏）
-    ce_only_epochs = max(3, int(0.05 * config.p2_epochs))
+    # --------- strategy (VkD-like schedule) ----------
+    ce_only_epochs = max(3, int(0.05 * config.p2_epochs))   # 前期只训 XE
+    warmup_epochs = max(10, int(0.15 * config.p2_epochs))   # 蒸馏权重 warmup
 
-    # 2) 然后再 warmup 蒸馏权重（参考 VkD：alpha/gamma 都是可控开关）
-    warmup_epochs = max(10, int(0.15 * config.p2_epochs))
+    beta_kd_max = 0.4
+    alpha_repr_max = 0.2
 
-    beta_kd_max = 0.4      # 原来 0.85 太激进，容易压死 CE（尤其你 batch 小、类多）
-    alpha_repr_max = 0.2   # pre-proj repr 蒸馏更强，权重要更保守
-
-    # 3) ArcFace margin 也 warmup：前期 m=0，更像普通分类，稳定后再恢复到 target_margin
-    margin_warmup_epochs = max(5, int(0.05 * config.p2_epochs))
+    margin_warmup_epochs = max(5, int(0.05 * config.p2_epochs))  # ArcFace margin warmup
 
     scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
-
     early_stop = EarlyStopping(patience=config.p2_patience)
     best_acc = 0.0
 
@@ -183,33 +224,28 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
         fusion_S.train()
         classifier_S.train()
 
-        # --- margin schedule ---
+        # margin warmup
         if hasattr(classifier_S, 'm'):
             if epoch < margin_warmup_epochs:
                 classifier_S.m = target_margin * float(epoch + 1) / float(margin_warmup_epochs)
             else:
                 classifier_S.m = target_margin
 
-        # --- distill weight schedule ---
+        # distill weights
         if epoch < ce_only_epochs:
             beta_kd = 0.0
             alpha_repr = 0.0
         else:
-            # linearly warm up
             prog = min(1.0, float(epoch - ce_only_epochs + 1) / float(warmup_epochs))
             beta_kd = beta_kd_max * prog
             alpha_repr = alpha_repr_max * prog
 
-        # meters
-        sum_loss = 0.0
-        sum_xe = 0.0
-        sum_kd = 0.0
-        sum_repr = 0.0
-        correct = 0
-        total = 0
+        sum_loss = sum_xe = sum_kd = sum_repr = 0.0
+        correct = total = 0
+        top5_sum = 0.0
 
         pbar = tqdm(total=len(train_loader),
-                    desc=f'[VkD-OPT] Epoch {epoch+1}/{config.p2_epochs} (beta={beta_kd:.3f}, alpha={alpha_repr:.3f}, m={getattr(classifier_S,"m",0):.3f})',
+                    desc=f'[VkD-OPT-v2] Ep {epoch+1}/{config.p2_epochs} beta={beta_kd:.3f} alpha={alpha_repr:.3f} m={getattr(classifier_S,"m",0):.3f}',
                     dynamic_ncols=True)
 
         for palm_img, vein_img, labels in train_loader:
@@ -217,34 +253,34 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
             vein_img = vein_img.to(config.device, non_blocking=True)
             labels   = labels.to(config.device, non_blocking=True)
 
+            # remap labels（关键：保证是 0..C-1 连续空间）
+            labels = remap_labels(labels, label_map)
+
             optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                # --- teacher forward (no grad) ---
+                # teacher
                 with torch.no_grad():
                     F_palm_T = cnn_palm_T(palm_img, return_spatial=False)
                     F_vein_T = cnn_vein_T(vein_img, return_spatial=False)
                     fused_T  = fusion_T(F_palm_T, F_vein_T)
                     preproj_T = cache_t.get('preproj', None)
 
-                # --- student forward ---
+                # student
                 F_palm_S = cnn_palm_S(palm_img, return_spatial=False)
                 F_vein_S = cnn_vein_S(vein_img, return_spatial=False)
                 fused_S  = fusion_S(F_palm_S, F_vein_S)
                 preproj_S = cache_s.get('preproj', None)
 
-                # --- XE (task loss) ---
                 logits_S = classifier_S(fused_S, labels)
                 loss_xe = ce_loss(logits_S, labels)
 
-                # --- KD losses (VkD-style: projector + teacher normalization + smoothl1) ---
                 loss_kd = torch.tensor(0.0, device=config.device)
                 loss_repr = torch.tensor(0.0, device=config.device)
 
                 if beta_kd > 0:
                     palm_S_kd = proj_palm(F_palm_S)
                     vein_S_kd = proj_vein(F_vein_S)
-                    # feature distill (方向 + 稳健损失)
                     loss_kd = (
                         1.0 * vkd_feature_loss(fused_S, fused_T, teacher_ln=False, normalize=True) +
                         0.5 * (vkd_feature_loss(palm_S_kd, F_palm_T, teacher_ln=True, normalize=True) +
@@ -253,12 +289,11 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
 
                 if alpha_repr > 0 and (preproj_T is not None) and (preproj_S is not None):
                     preproj_S_256 = proj_preproj(preproj_S)
-                    loss_repr = vkd_repr_loss(preproj_S_256, preproj_T, layernorm_teacher=True)
+                    loss_repr = vkd_repr_loss(preproj_S_256, preproj_T)
 
                 loss = loss_xe + beta_kd * loss_kd + alpha_repr * loss_repr
 
             scaler.scale(loss).backward()
-            # grad clip (unscale first)
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(cnn_palm_S.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(cnn_vein_S.parameters(), 1.0)
@@ -271,7 +306,6 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
             scaler.step(optimizer)
             scaler.update()
 
-            # metrics
             sum_loss += float(loss.detach().cpu())
             sum_xe += float(loss_xe.detach().cpu())
             sum_kd += float(loss_kd.detach().cpu())
@@ -280,6 +314,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
             _, pred = torch.max(logits_S, 1)
             correct += (pred == labels).sum().item()
             total += labels.size(0)
+            top5_sum += topk_accuracy(logits_S, labels, k=5)
 
             pbar.update(1)
 
@@ -290,6 +325,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
         tr_kd = sum_kd / len(train_loader)
         tr_repr = sum_repr / len(train_loader)
         tr_acc = 100.0 * correct / max(1, total)
+        tr_acc5 = top5_sum / len(train_loader)
 
         # ---------------- Validation ----------------
         cnn_palm_S.eval()
@@ -297,17 +333,18 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
         fusion_S.eval()
         classifier_S.eval()
 
-        # eval: ArcFace 不加 margin（更接近推理）
         old_m = getattr(classifier_S, 'm', None)
         if old_m is not None:
-            classifier_S.m = 0.0
+            classifier_S.m = 0.0  # eval no margin
 
         val_loss, val_correct, val_total = 0.0, 0, 0
+        val_top5_sum = 0.0
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
             for palm_img, vein_img, labels in val_loader:
                 palm_img = palm_img.to(config.device, non_blocking=True)
                 vein_img = vein_img.to(config.device, non_blocking=True)
                 labels   = labels.to(config.device, non_blocking=True)
+                labels = remap_labels(labels, label_map)
 
                 F_palm_S = cnn_palm_S(palm_img, return_spatial=False)
                 F_vein_S = cnn_vein_S(vein_img, return_spatial=False)
@@ -320,26 +357,30 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
                 _, pred = torch.max(logits_S, 1)
                 val_correct += (pred == labels).sum().item()
                 val_total += labels.size(0)
+                val_top5_sum += topk_accuracy(logits_S, labels, k=5)
 
         if old_m is not None:
             classifier_S.m = old_m
 
         va_loss = val_loss / len(val_loader)
         va_acc = 100.0 * val_correct / max(1, val_total)
+        va_acc5 = val_top5_sum / len(val_loader)
 
-        print(f"[VkD-OPT][Epoch {epoch+1}] "
+        print(f"[VkD-OPT-v2][Epoch {epoch+1}] "
               f"TrLoss={tr_loss:.4f} (XE={tr_xe:.4f}, KD={tr_kd:.4f}, Repr={tr_repr:.4f}) "
-              f"TrAcc={tr_acc:.4f}% | VaLoss={va_loss:.4f}, VaAcc={va_acc:.4f}%")
+              f"TrAcc={tr_acc:.4f}% TrAcc@5={tr_acc5:.4f}% | "
+              f"VaLoss={va_loss:.4f}, VaAcc={va_acc:.4f}% VaAcc@5={va_acc5:.4f}%")
 
-        # TB logs
         writer.add_scalar('Train/TotalLoss', tr_loss, epoch)
         writer.add_scalar('Train/XE', tr_xe, epoch)
         writer.add_scalar('Train/KD', tr_kd, epoch)
         writer.add_scalar('Train/Repr', tr_repr, epoch)
-        writer.add_scalar('Train/Acc', tr_acc, epoch)
+        writer.add_scalar('Train/Acc1', tr_acc, epoch)
+        writer.add_scalar('Train/Acc5', tr_acc5, epoch)
 
         writer.add_scalar('Val/Loss', va_loss, epoch)
-        writer.add_scalar('Val/Acc', va_acc, epoch)
+        writer.add_scalar('Val/Acc1', va_acc, epoch)
+        writer.add_scalar('Val/Acc5', va_acc5, epoch)
 
         writer.add_scalar('Sched/beta_kd', beta_kd, epoch)
         writer.add_scalar('Sched/alpha_repr', alpha_repr, epoch)
@@ -355,10 +396,11 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
                 'proj_preproj': proj_preproj.state_dict(),
                 'proj_palm': proj_palm.state_dict(),
                 'proj_vein': proj_vein.state_dict(),
+                'label_map': label_map,  # 保存映射，便于复现/部署
             }, os.path.join(config.save_dir, 'distill_best.pth'))
 
         if early_stop(-va_acc, mode='min'):
-            print(f"[VkD-OPT] Early stopping at epoch {epoch+1}")
+            print(f"[VkD-OPT-v2] Early stopping at epoch {epoch+1}")
             break
 
         scheduler.step()
@@ -373,4 +415,4 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt'):
 if __name__ == '__main__':
     os.makedirs(config.save_dir, exist_ok=True)
     best = train_joint_distill()
-    print(f"[VkD-OPT] Final best val acc: {best:.4f}%")
+    print(f"[VkD-OPT-v2] Final best val acc: {best:.4f}%")

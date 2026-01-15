@@ -133,10 +133,62 @@ def arcface_logits_no_margin(head: nn.Module,
     return logits * s
 
 
+
+# ------------------------------
+# 仅用 teacher embedding 构造“类别原型(prototype)”来做 KL 蒸馏（teacher 没有 classifier 权重时的替代方案）
+# 思路：对每个类别，统计 teacher 的 fused embedding 均值作为该类原型，然后用 cosine similarity 得到 logits。
+# 这样可以得到与分类任务一致的“soft targets”，并且不需要 teacher 保存 classifier。
+# ------------------------------
+@torch.no_grad()
+def compute_teacher_prototypes(train_loader,
+                               label_map: Dict[int, int],
+                               num_classes: int,
+                               cnn_palm_T,
+                               cnn_vein_T,
+                               fusion_T,
+                               device,
+                               emb_dim: int = 512) -> torch.Tensor:
+    sums = torch.zeros(num_classes, emb_dim, dtype=torch.float32)
+    cnts = torch.zeros(num_classes, dtype=torch.long)
+
+    for palm_img, vein_img, labels in tqdm(train_loader, desc='[Proto] Build teacher prototypes', dynamic_ncols=True):
+        palm_img = palm_img.to(device, non_blocking=True)
+        vein_img = vein_img.to(device, non_blocking=True)
+        labels   = labels.to(device, non_blocking=True)
+        labels = remap_labels(labels, label_map)
+
+        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            F_palm_T = cnn_palm_T(palm_img, return_spatial=False)
+            F_vein_T = cnn_vein_T(vein_img, return_spatial=False)
+            fused_T  = fusion_T(F_palm_T, F_vein_T)  # [B,512] (通常已 L2Norm)
+
+        # 转 cpu 统计更稳，且内存小（500x512）
+        emb = fused_T.detach().float().cpu()
+        y = labels.detach().cpu()
+
+        for i in range(emb.size(0)):
+            cls = int(y[i].item())
+            sums[cls] += emb[i]
+            cnts[cls] += 1
+
+    # 均值 + normalize
+    cnts = torch.clamp(cnts, min=1).unsqueeze(1).float()
+    proto = sums / cnts
+    proto = F.normalize(proto, dim=1)  # [C,512]
+    return proto.to(device)
+
+
+def proto_logits(emb: torch.Tensor, proto: torch.Tensor, scale: float = 20.0) -> torch.Tensor:
+
+    emb_n = F.normalize(emb, dim=1)
+    return scale * F.linear(emb_n, proto)  # proto: [C,512] => acts like weight
+
+
 # ------------------------------
 # Build teacher (and optionally teacher classifier for KL distill)
 # ------------------------------
-def build_stage2_teacher_and_optional_classifier(num_classes: int):
+def build_stage2_teacher(num_classes: int):
+
     cnn_palm_T, feat_dim_T, _ = build_backbone('mobilefacenet')
     cnn_vein_T, _, _          = build_backbone('mobilefacenet')
     fusion_T = Stage2Fusion(
@@ -154,27 +206,6 @@ def build_stage2_teacher_and_optional_classifier(num_classes: int):
     cnn_vein_T.load_state_dict(ckpt['cnn_vein'])
     fusion_T.load_state_dict(ckpt['fusion'])
 
-    # 可选：teacher 的分类头（如果你的 stage2 训练时有保存）
-    classifier_T = None
-    if isinstance(ckpt, dict) and ('classifier' in ckpt):
-        classifier_T = Arcface_Head(
-            embedding_size=512,
-            num_classes=num_classes,
-            s=20.0,
-            m=0.0,  # teacher logits 用 no-margin
-        ).to(config.device)
-        try:
-            classifier_T.load_state_dict(ckpt['classifier'])
-            for p in classifier_T.parameters():
-                p.requires_grad = False
-            classifier_T.eval()
-            print("==> Loaded teacher classifier head for KL distillation.")
-        except Exception as e:
-            print(f"[Warn] teacher classifier exists but failed to load: {e}")
-            classifier_T = None
-    else:
-        print("==> Teacher classifier not found in checkpoint. KL distillation will be disabled.")
-
     for m in [cnn_palm_T, cnn_vein_T, fusion_T]:
         m.to(config.device)
         m.eval()
@@ -182,10 +213,11 @@ def build_stage2_teacher_and_optional_classifier(num_classes: int):
             p.requires_grad = False
 
     print(f"==> Loaded teacher from {ckpt_path}")
-    return cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T, classifier_T
+    return cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T
 
 
-def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
+
+def train_joint_distill(log_dir='runs_distill_vkd_opt_v4_fast_proto_v2'):
     writer = SummaryWriter(log_dir=log_dir)
 
     train_loader, val_loader, num_classes_from_loader = create_phase2_dataloaders(
@@ -203,7 +235,21 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
         print(f"[LabelMap] disabled. num_classes(from loader)={num_classes}")
 
     # --------- teacher ----------
-    cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T, classifier_T = build_stage2_teacher_and_optional_classifier(num_classes)
+    cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T = build_stage2_teacher(num_classes)
+
+    # ---------- v4-fast-proto：teacher 没有 classifier 权重时，用 teacher embedding 构造类别原型做 KL 蒸馏 ----------
+    # 这一步只需要跑一遍 train_loader（开销很小），得到 [C,512] 的 proto 矩阵。
+    teacher_proto = compute_teacher_prototypes(
+        train_loader=train_loader,
+        label_map=label_map,
+        num_classes=num_classes,
+        cnn_palm_T=cnn_palm_T,
+        cnn_vein_T=cnn_vein_T,
+        fusion_T=fusion_T,
+        device=config.device,
+        emb_dim=512
+    )
+    print("==> Built teacher prototypes for KL distillation.")
 
     # --------- student ----------
     cnn_palm_S, feat_dim_S, _ = build_backbone('tiny_mobilefacenet')
@@ -253,7 +299,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
     optimizer = torch.optim.Adam(params, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
-    ce_loss = nn.CrossEntropyLoss()
+    ce_loss = nn.CrossEntropyLoss()  
     kl = nn.KLDivLoss(reduction='batchmean')
 
     # Strategy:
@@ -264,9 +310,11 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
     # weights (make KL the main distill for classification, like VkD's gamma)
     beta_feat_max = 0.2        # feature KD (small)
     alpha_repr_max = 0.15      # repr distill (small)
-    gamma_kl_max = 0.8         # KL distill (main)
+    gamma_kl_max = 2.0         # v2: 提高KL权重（teacher无classifier时更依赖原型KL）
 
-    T = 2.0                    # temperature for KL
+    T = 1.5                    # v2: 温度更低，KL信号更强
+
+    proto_scale = 64.0          # v2: 原型logits放大(类似ArcFace的s)，让soft targets更尖锐
 
     # margin warmup longer (ArcFace is harder for small student)
     margin_warmup_epochs = 60  # v4-fast: 更久时间保持小margin，XE下降更快
@@ -304,7 +352,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
         top5_sum = 0.0
 
         pbar = tqdm(total=len(train_loader),
-                    desc=f'[VkD-OPT-v4] Ep {epoch+1}/{config.p2_epochs} '
+                    desc=f'[VkD-OPT-v4-PROTO] Ep {epoch+1}/{config.p2_epochs} '
                          f'beta={beta_feat:.3f} alpha={alpha_repr:.3f} gamma={gamma_kl:.3f} m={getattr(classifier_S,"m",0):.3f}',
                     dynamic_ncols=True)
 
@@ -324,10 +372,10 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
                     fused_T  = fusion_T(F_palm_T, F_vein_T)
                     preproj_T = cache_t.get('preproj', None)
 
-                    # teacher logits (no-margin) for KL distill if head exists
+                    # teacher logits for KL distill (用 prototype，不需要 teacher classifier)
                     logits_T = None
-                    if classifier_T is not None and gamma_kl > 0:
-                        logits_T = arcface_logits_no_margin(classifier_T, fused_T, num_classes=num_classes, emb_dim=512)
+                    if gamma_kl > 0:
+                        logits_T = proto_logits(fused_T, teacher_proto, scale=proto_scale)
 
                 # student forward
                 F_palm_S = cnn_palm_S(palm_img, return_spatial=False)
@@ -359,7 +407,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
                 # KL distill on logits (VkD-style gamma)
                 loss_kl = torch.tensor(0.0, device=config.device)
                 if gamma_kl > 0 and logits_T is not None:
-                    logits_S_nom = arcface_logits_no_margin(classifier_S, fused_S, num_classes=num_classes, emb_dim=512)
+                    logits_S_nom = proto_logits(fused_S, teacher_proto, scale=proto_scale)  # 用同一套原型做 student logits
                     loss_kl = kl(F.log_softmax(logits_S_nom / T, dim=-1),
                                  F.softmax(logits_T / T, dim=-1)) * (T * T)
 
@@ -436,8 +484,8 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
         va_acc = 100.0 * val_correct / max(1, val_total)
         va_acc5 = val_top5_sum / len(val_loader)
 
-        print(f"[VkD-OPT-v4][Epoch {epoch+1}] "
-              f"TrLoss={tr_loss:.4f} (XE={tr_xe:.4f}, Feat={tr_feat:.4f}, Repr={tr_repr:.4f}, KL={tr_kl:.4f}) "
+        print(f"[VkD-OPT-v4-PROTO][Epoch {epoch+1}] "
+              f"TrLoss={tr_loss:.4f} (XE={tr_xe:.4f}, Feat={tr_feat:.4f}, Repr={tr_repr:.4f}, KL={tr_kl:.6f}) "
               f"TrAcc={tr_acc:.4f}% TrAcc@5={tr_acc5:.4f}% | "
               f"VaLoss={va_loss:.4f}, VaAcc={va_acc:.4f}% VaAcc@5={va_acc5:.4f}%")
 
@@ -473,7 +521,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
             }, os.path.join(config.save_dir, 'distill_best.pth'))
 
         if early_stop(-va_acc, mode='min'):
-            print(f"[VkD-OPT-v4] Early stopping at epoch {epoch+1}")
+            print(f"[VkD-OPT-v4-PROTO] Early stopping at epoch {epoch+1}")
             break
 
         scheduler.step()
@@ -488,4 +536,4 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
 if __name__ == '__main__':
     os.makedirs(config.save_dir, exist_ok=True)
     best = train_joint_distill()
-    print(f"[VkD-OPT-v4] Final best val acc: {best:.4f}%")
+    print(f"[VkD-OPT-v4-PROTO] Final best val acc: {best:.4f}%")

@@ -1,5 +1,6 @@
 import warnings
 warnings.filterwarnings('ignore')
+
 import os
 import torch
 import torch.nn as nn
@@ -8,6 +9,7 @@ from torch.nn.utils.parametrizations import orthogonal
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from models.student_fusion import Stage2FusionStudent_BottleneckGate    
+from utils.kd_loss import total_loss
 from train_teacher import config, build_backbone, create_phase2_dataloaders, EarlyStopping
 from models.stage2 import Stage2Fusion
 from utils.head import Arcface_Head
@@ -44,9 +46,11 @@ def build_stage2_teacher():
 
 
 def make_orth_linear(in_dim: int, out_dim: int, bias: bool = False) -> nn.Module:
-    """VkD-style orthogonal projector: constrain W to be (semi-)orthogonal when supported."""
+    """VkD-style orthogonal projector.
+    If torch supports orthogonal parametrization, constrain W to be (semi-)orthogonal;
+    otherwise keep orthogonal initialization (best-effort).
+    """
     lin = nn.Linear(in_dim, out_dim, bias=bias)
-    # good initialization regardless of whether orth parametrization exists
     nn.init.orthogonal_(lin.weight)
     if lin.bias is not None:
         nn.init.zeros_(lin.bias)
@@ -59,13 +63,13 @@ def vkd_feature_loss(
     s: torch.Tensor,
     t: torch.Tensor,
     use_layernorm: bool = True,
-    match_norm: bool = True,
+    match_norm: bool = False,
     norm_weight: float = 0.05,
 ) -> torch.Tensor:
     """VkD-style feature distillation:
-    - task-specific normalization (here: optional LayerNorm)
-    - compare normalized features with SmoothL1 (robust)
-    - optionally match feature norms for non-L2-normalized embeddings
+    - optional LayerNorm (task-specific normalization)
+    - align directions with SmoothL1 on L2-normalized features
+    - optional norm matching (usually OFF if you already LayerNorm)
     """
     if use_layernorm:
         s = F.layer_norm(s, (s.size(1),))
@@ -76,6 +80,7 @@ def vkd_feature_loss(
     if match_norm:
         loss = loss + norm_weight * F.smooth_l1_loss(s.norm(dim=1), t.norm(dim=1))
     return loss
+
 
 def kd_cosine(s, t):
     s = F.normalize(s, dim=1)
@@ -105,25 +110,35 @@ def train_joint_distill(log_dir='runs_distill'):
         m=0.10,
     ).to(config.device)
 
-    # ---------- VkD: orthogonal projectors for feature distillation ----------
-    # Even if dims match, an orthogonal projector can "rotate" student features to teacher space
-    # while avoiding degenerate scaling/shearing.
-    proj_palm_kd = make_orth_linear(feat_dim_S, feat_dim_T, bias=False).to(config.device)
-    proj_vein_kd = make_orth_linear(feat_dim_S, feat_dim_T, bias=False).to(config.device)
-    proj_fuse_kd = make_orth_linear(512, 512, bias=False).to(config.device)
 
-    # KD weight schedule (warmup helps avoid early training instability)
-    beta_kd_max = 0.85
-    kd_warmup_epochs = max(1, int(0.1 * config.p2_epochs))
+    # ---------- VkD (Plan B): distill fusion pre-proj representations ----------
+    # Capture teacher's 256-d fused_feat BEFORE fusion_T.proj, and student's 128-d bottleneck BEFORE fusion_S.proj
+    _hook_cache = {'t_preproj': None, 's_bottleneck': None}
+
+    def _hook_t_proj(module, inp, out):
+        # inp[0]: [B, 256] (pre-proj feature)
+        _hook_cache['t_preproj'] = inp[0].detach()
+
+    def _hook_s_proj(module, inp, out):
+        # inp[0]: [B, bottleneck=128] (student bottleneck feature, keep graph)
+        _hook_cache['s_bottleneck'] = inp[0]
+
+    # Register hooks once
+    _t_handle = fusion_T.proj.register_forward_hook(_hook_t_proj)
+    _s_handle = fusion_S.proj.register_forward_hook(_hook_s_proj)
+
+    # Project student bottleneck (128) -> teacher pre-proj space (256) with (semi-)orthogonal projector
+    proj_preproj_kd = make_orth_linear(128, feat_dim_T, bias=False).to(config.device)
+
+    # Weight for pre-proj distillation (keep small at first; tune if needed)
+    w_preproj = 0.5
 
     params = [
         {'params': cnn_palm_S.parameters(), 'lr': config.p2_enc_lr},
         {'params': cnn_vein_S.parameters(), 'lr': config.p2_enc_lr},
         {'params': fusion_S.parameters(),   'lr': config.p2_lr},
         {'params': classifier_S.parameters(),'lr': config.p2_lr},
-        {'params': proj_palm_kd.parameters(), 'lr': config.p2_lr},
-        {'params': proj_vein_kd.parameters(), 'lr': config.p2_lr},
-        {'params': proj_fuse_kd.parameters(), 'lr': config.p2_lr},
+        {'params': proj_preproj_kd.parameters(), 'lr': config.p2_lr},
     ]
     optimizer = torch.optim.Adam(params, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -133,13 +148,12 @@ def train_joint_distill(log_dir='runs_distill'):
     mse_loss = nn.MSELoss()
     
 
-    beta_kd = beta_kd_max    # 最大蒸馏权重（每个 epoch 会做 warmup）
+    beta_kd = 0.80    # 融合特征蒸馏权重，可以根据效果调整
 
     early_stop = EarlyStopping(patience=config.p2_patience)
     best_acc = 0.0
 
     for epoch in range(config.p2_epochs):
-        beta_kd = beta_kd_max * min(1.0, float(epoch + 1) / float(kd_warmup_epochs))
         cnn_palm_S.train()
         cnn_vein_S.train()
         fusion_S.train()
@@ -172,16 +186,19 @@ def train_joint_distill(log_dir='runs_distill'):
             logits_S = classifier_S(fused_S, labels)
             # ---------- 计算损失 ----------
             loss_ce = ce_loss(logits_S, labels)
-            F_palm_S_kd = proj_palm_kd(F_palm_S)
-            F_vein_S_kd = proj_vein_kd(F_vein_S)
-            fused_S_kd  = proj_fuse_kd(fused_S)
+            loss_kd_fuse = kd_cosine(fused_S, fused_T)
+            loss_kd_palm = kd_cosine(F_palm_S, F_palm_T)
+            loss_kd_vein = kd_cosine(F_vein_S, F_vein_T)
 
-            # VkD-style feature distillation losses
-            loss_kd_fuse = vkd_feature_loss(fused_S_kd, fused_T, use_layernorm=False, match_norm=False)
-            loss_kd_palm = vkd_feature_loss(F_palm_S_kd, F_palm_T, use_layernorm=True, match_norm=True)
-            loss_kd_vein = vkd_feature_loss(F_vein_S_kd, F_vein_T, use_layernorm=True, match_norm=True)
+            # Pre-proj distillation: student bottleneck (128) -> teacher pre-proj (256)
+            # (hook values are set during fusion_T(...) and fusion_S(...) forward above)
+            if _hook_cache['t_preproj'] is None or _hook_cache['s_bottleneck'] is None:
+                raise RuntimeError("Pre-proj hook cache missing. Check that fusion_T.proj and fusion_S.proj exist.")
+            s_pre = proj_preproj_kd(_hook_cache['s_bottleneck'])   # [B, 256]
+            t_pre = _hook_cache['t_preproj']                       # [B, 256]
+            loss_kd_preproj = vkd_feature_loss(s_pre, t_pre, use_layernorm=True, match_norm=False)
 
-            loss_kd = 1.0 * loss_kd_fuse + 0.5 * (loss_kd_palm + loss_kd_vein)
+            loss_kd = 1.0 * loss_kd_fuse + 0.5 * (loss_kd_palm + loss_kd_vein) + w_preproj * loss_kd_preproj
             loss = loss_ce + beta_kd * loss_kd
 
             optimizer.zero_grad()
@@ -259,6 +276,13 @@ def train_joint_distill(log_dir='runs_distill'):
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    # remove hooks
+    try:
+        _t_handle.remove()
+        _s_handle.remove()
+    except Exception:
+        pass
 
     writer.close()
     return best_acc

@@ -107,7 +107,15 @@ def move_kd_loss_from_features(
     Returns:
       kd_loss (scalar), debug dict.
     """
-    loss_fuse = _move_token_weighted_mse_fuse(fused_S, fused_T, use_token_weight)  # [B]
+    loss_fuse = kd_cosine_per_sample(fused_S, fused_T)  # [B]  (more stable for this project)
+    if use_token_weight:
+        # Optional: lightweight dimension-importance term (proxy of token_weight).
+        # Keep it small to avoid overwhelming cosine KD.
+        s_n = F.normalize(fused_S, dim=1)
+        t_n = F.normalize(fused_T, dim=1)
+        mse_vec = (s_n - t_n).pow(2)  # [B, 512]
+        w_dim = torch.softmax(t_n.abs(), dim=1)  # [B, 512]
+        loss_fuse = loss_fuse + 0.1 * (mse_vec * w_dim).sum(dim=1)
     loss_palm = kd_cosine_per_sample(palm_S, palm_T)  # [B]
     loss_vein = kd_cosine_per_sample(vein_S, vein_T)  # [B]
 
@@ -193,7 +201,7 @@ def train_joint_distill(log_dir='runs_distill'):
     # and distributes the remaining (1-alpha) over other teachers.
     kd_w = float(getattr(config, 'kd_w', 1.0))
     kd_memory_w = float(getattr(config, 'kd_memory_w', 0.85))   # alpha in MoVE-KD
-    use_token_weight = bool(getattr(config, 'token_weight', True))
+    use_token_weight = bool(getattr(config, 'token_weight', False))  # default OFF: no true patch tokens here
     use_teacher_weight = bool(getattr(config, 'teacher_weight', True))
     teacher_temp = float(getattr(config, 'teacher_temp', 1.0))
 
@@ -312,7 +320,6 @@ def train_joint_distill(log_dir='runs_distill'):
                 'cnn_palm': cnn_palm_S.state_dict(),
                 'cnn_vein': cnn_vein_S.state_dict(),
                 'fusion': fusion_S.state_dict(),
-                'classifier': classifier_S.state_dict(),
             }, os.path.join(config.save_dir, 'distill_best.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):

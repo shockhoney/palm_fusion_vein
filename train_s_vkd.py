@@ -265,7 +265,7 @@ def train_joint_distill(log_dir='runs_distill'):
                 'cnn_vein': cnn_vein_S.state_dict(),
                 'fusion': fusion_S.state_dict(),
                 'classifier': classifier_S.state_dict(),
-            }, os.path.join(config.save_dir, 'distill_best.pth'))
+            }, os.path.join(config.save_dir, 'distill_best_vkd.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"[JointDistill] Early stopping at epoch {epoch+1}")

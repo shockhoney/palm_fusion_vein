@@ -66,8 +66,8 @@ def train_joint_distill(log_dir='runs_distill'):
     classifier_S = Arcface_Head(
         embedding_size=512,
         num_classes=num_classes,
-        s=30.0,
-        m=0.20,
+        s=20.0,
+        m=0.10,
     ).to(config.device)
 
     params = [

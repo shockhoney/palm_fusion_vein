@@ -2,7 +2,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -66,9 +66,12 @@ def topk_accuracy(logits: torch.Tensor, target: torch.Tensor, k: int = 5) -> flo
         return 100.0 * correct
 
 
+# ------------------------------
+# Label remap helpers (避免 label 不连续/不一致导致 acc 恒为 0)
+# ------------------------------
 def parse_label_ids_from_txt(txt_path: str) -> List[int]:
     """Parse label ids from dataset txt file.
-    Assumption (robust): label id is the last whitespace-separated token of each non-empty line.
+    Assumption: label id is the last whitespace-separated token of each non-empty line.
     """
     ids: List[int] = []
     if (txt_path is None) or (not os.path.exists(txt_path)):
@@ -87,9 +90,7 @@ def parse_label_ids_from_txt(txt_path: str) -> List[int]:
 
 
 def build_label_mapping(train_txt: str, val_txt: str) -> Dict[int, int]:
-    """Build a stable mapping from raw label ids -> [0..C-1] using train+val txt files.
-    This prevents 'acc always 0' caused by non-contiguous / inconsistent label indices.
-    """
+    """Build mapping from raw label ids -> [0..C-1] using train+val txt files."""
     train_ids = parse_label_ids_from_txt(train_txt)
     val_ids = parse_label_ids_from_txt(val_txt)
     all_ids = sorted(set(train_ids + val_ids))
@@ -104,9 +105,77 @@ def remap_labels(labels: torch.Tensor, mapping: Dict[int, int]) -> torch.Tensor:
         return labels
     lbl = labels.detach().to("cpu").tolist()
     mapped = [mapping[int(x)] for x in lbl]
-    return torch.tensor(mapped, device=labels.device, dtype=labels.dtype)
+    return torch.tensor(mapped, device=labels.device, dtype=torch.long)
 
 
+# ------------------------------
+# ArcFace no-margin logits (关键！)
+# 你的 train/val acc 一直 0，很可能是因为你用的是“带 margin 的 logits”
+# 带 margin 的 logits 会刻意压低 GT 类别相似度，所以用它做 argmax 统计会极不合理，甚至全 0。
+#
+# 参考做法：像很多分类 repo 一样，
+# 训练用 ArcFace logits（带 margin）算 loss，
+# 但评估/统计精度用 “no-margin cosine logits”。
+# ------------------------------
+def _find_class_weight(head: nn.Module, num_classes: int, emb_dim: int) -> torch.Tensor:
+    """
+    尽量鲁棒地从 Arcface_Head 里找到 class weight:
+    - 常见名字: weight / kernel / W
+    - 也可能隐藏在 parameters 里，形状是 [C, D] 或 [D, C]
+    """
+    # common attribute names
+    for name in ["weight", "kernel", "W"]:
+        if hasattr(head, name):
+            w = getattr(head, name)
+            if isinstance(w, torch.Tensor) and w.ndim == 2:
+                return w
+
+    # fallback: search parameters by shape
+    for _, p in head.named_parameters(recurse=True):
+        if p.ndim != 2:
+            continue
+        if p.shape == (num_classes, emb_dim) or p.shape == (emb_dim, num_classes):
+            return p
+
+    # last resort: first 2D param
+    for _, p in head.named_parameters(recurse=True):
+        if p.ndim == 2:
+            return p
+
+    raise RuntimeError("Cannot find class weight matrix in Arcface_Head.")
+
+
+def arcface_logits_no_margin(head: nn.Module,
+                             emb: torch.Tensor,
+                             num_classes: int,
+                             emb_dim: int,
+                             scale: Optional[float] = None) -> torch.Tensor:
+    """
+    计算不带 margin 的 logits：
+      logits = s * (normalize(x) @ normalize(W)^T)
+    用于：
+    - 训练过程统计 acc（不要用带 margin 的 logits）
+    - 验证/测试（推荐用 no-margin）
+    """
+    w = _find_class_weight(head, num_classes=num_classes, emb_dim=emb_dim)
+    x = F.normalize(emb, dim=1)
+    if w.shape[0] == num_classes:
+        w_n = F.normalize(w, dim=1)
+        logits = F.linear(x, w_n)  # [B, C]
+    else:
+        # shape [D, C]
+        w_n = F.normalize(w, dim=0)
+        logits = x @ w_n  # [B, C]
+
+    s = scale
+    if s is None:
+        s = float(getattr(head, "s", 1.0))
+    return logits * s
+
+
+# ------------------------------
+# Teacher builder
+# ------------------------------
 def build_stage2_teacher():
     cnn_palm_T, feat_dim_T, _ = build_backbone('mobilefacenet')
     cnn_vein_T, _, _          = build_backbone('mobilefacenet')
@@ -135,7 +204,7 @@ def build_stage2_teacher():
     return cnn_palm_T, cnn_vein_T, fusion_T, feat_dim_T
 
 
-def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
+def train_joint_distill(log_dir='runs_distill_vkd_opt_v3'):
     writer = SummaryWriter(log_dir=log_dir)
 
     # --------- teacher ----------
@@ -154,7 +223,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
         config.phase2_train, config.phase2_val, config.p2_batch
     )
 
-    # ========== 关键修复：构建稳定的 label remap ==========
+    # --------- label remap ----------
     label_map = build_label_mapping(config.phase2_train, config.phase2_val)
     if label_map:
         num_classes = len(label_map)
@@ -205,14 +274,14 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
 
     ce_loss = nn.CrossEntropyLoss()
 
-    # --------- strategy (VkD-like schedule) ----------
-    ce_only_epochs = max(3, int(0.05 * config.p2_epochs))   # 前期只训 XE
-    warmup_epochs = max(10, int(0.15 * config.p2_epochs))   # 蒸馏权重 warmup
+    # --------- strategy ----------
+    ce_only_epochs = max(3, int(0.05 * config.p2_epochs))
+    warmup_epochs = max(10, int(0.15 * config.p2_epochs))
 
     beta_kd_max = 0.4
     alpha_repr_max = 0.2
 
-    margin_warmup_epochs = max(5, int(0.05 * config.p2_epochs))  # ArcFace margin warmup
+    margin_warmup_epochs = max(5, int(0.05 * config.p2_epochs))
 
     scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
     early_stop = EarlyStopping(patience=config.p2_patience)
@@ -224,7 +293,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
         fusion_S.train()
         classifier_S.train()
 
-        # margin warmup
+        # margin warmup（训练算 loss 用带 margin 的 logits）
         if hasattr(classifier_S, 'm'):
             if epoch < margin_warmup_epochs:
                 classifier_S.m = target_margin * float(epoch + 1) / float(margin_warmup_epochs)
@@ -245,15 +314,13 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
         top5_sum = 0.0
 
         pbar = tqdm(total=len(train_loader),
-                    desc=f'[VkD-OPT-v2] Ep {epoch+1}/{config.p2_epochs} beta={beta_kd:.3f} alpha={alpha_repr:.3f} m={getattr(classifier_S,"m",0):.3f}',
+                    desc=f'[VkD-OPT-v3] Ep {epoch+1}/{config.p2_epochs} beta={beta_kd:.3f} alpha={alpha_repr:.3f} m={getattr(classifier_S,"m",0):.3f}',
                     dynamic_ncols=True)
 
         for palm_img, vein_img, labels in train_loader:
             palm_img = palm_img.to(config.device, non_blocking=True)
             vein_img = vein_img.to(config.device, non_blocking=True)
             labels   = labels.to(config.device, non_blocking=True)
-
-            # remap labels（关键：保证是 0..C-1 连续空间）
             labels = remap_labels(labels, label_map)
 
             optimizer.zero_grad(set_to_none=True)
@@ -272,12 +339,12 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
                 fused_S  = fusion_S(F_palm_S, F_vein_S)
                 preproj_S = cache_s.get('preproj', None)
 
-                logits_S = classifier_S(fused_S, labels)
-                loss_xe = ce_loss(logits_S, labels)
+                # ---- training logits (with margin) for loss ----
+                logits_arc = classifier_S(fused_S, labels)
+                loss_xe = ce_loss(logits_arc, labels)
 
+                # ---- KD ----
                 loss_kd = torch.tensor(0.0, device=config.device)
-                loss_repr = torch.tensor(0.0, device=config.device)
-
                 if beta_kd > 0:
                     palm_S_kd = proj_palm(F_palm_S)
                     vein_S_kd = proj_vein(F_vein_S)
@@ -287,6 +354,8 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
                                vkd_feature_loss(vein_S_kd, F_vein_T, teacher_ln=True, normalize=True))
                     )
 
+                # ---- repr distill on fusion pre-proj ----
+                loss_repr = torch.tensor(0.0, device=config.device)
                 if alpha_repr > 0 and (preproj_T is not None) and (preproj_S is not None):
                     preproj_S_256 = proj_preproj(preproj_S)
                     loss_repr = vkd_repr_loss(preproj_S_256, preproj_T)
@@ -311,10 +380,13 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
             sum_kd += float(loss_kd.detach().cpu())
             sum_repr += float(loss_repr.detach().cpu())
 
-            _, pred = torch.max(logits_S, 1)
-            correct += (pred == labels).sum().item()
-            total += labels.size(0)
-            top5_sum += topk_accuracy(logits_S, labels, k=5)
+            # ---- 训练精度统计：必须用 no-margin logits ----
+            with torch.no_grad():
+                logits_nom = arcface_logits_no_margin(classifier_S, fused_S, num_classes=num_classes, emb_dim=512)
+                _, pred = torch.max(logits_nom, 1)
+                correct += (pred == labels).sum().item()
+                total += labels.size(0)
+                top5_sum += topk_accuracy(logits_nom, labels, k=5)
 
             pbar.update(1)
 
@@ -333,10 +405,6 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
         fusion_S.eval()
         classifier_S.eval()
 
-        old_m = getattr(classifier_S, 'm', None)
-        if old_m is not None:
-            classifier_S.m = 0.0  # eval no margin
-
         val_loss, val_correct, val_total = 0.0, 0, 0
         val_top5_sum = 0.0
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
@@ -350,23 +418,21 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
                 F_vein_S = cnn_vein_S(vein_img, return_spatial=False)
                 fused_S  = fusion_S(F_palm_S, F_vein_S)
 
-                logits_S = classifier_S(fused_S, labels)
-                loss = ce_loss(logits_S, labels)
+                # 验证：统一用 no-margin logits 来算 loss/acc（更贴近推理）
+                logits_nom = arcface_logits_no_margin(classifier_S, fused_S, num_classes=num_classes, emb_dim=512)
+                loss = ce_loss(logits_nom, labels)
                 val_loss += float(loss.detach().cpu())
 
-                _, pred = torch.max(logits_S, 1)
+                _, pred = torch.max(logits_nom, 1)
                 val_correct += (pred == labels).sum().item()
                 val_total += labels.size(0)
-                val_top5_sum += topk_accuracy(logits_S, labels, k=5)
-
-        if old_m is not None:
-            classifier_S.m = old_m
+                val_top5_sum += topk_accuracy(logits_nom, labels, k=5)
 
         va_loss = val_loss / len(val_loader)
         va_acc = 100.0 * val_correct / max(1, val_total)
         va_acc5 = val_top5_sum / len(val_loader)
 
-        print(f"[VkD-OPT-v2][Epoch {epoch+1}] "
+        print(f"[VkD-OPT-v3][Epoch {epoch+1}] "
               f"TrLoss={tr_loss:.4f} (XE={tr_xe:.4f}, KD={tr_kd:.4f}, Repr={tr_repr:.4f}) "
               f"TrAcc={tr_acc:.4f}% TrAcc@5={tr_acc5:.4f}% | "
               f"VaLoss={va_loss:.4f}, VaAcc={va_acc:.4f}% VaAcc@5={va_acc5:.4f}%")
@@ -396,11 +462,11 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
                 'proj_preproj': proj_preproj.state_dict(),
                 'proj_palm': proj_palm.state_dict(),
                 'proj_vein': proj_vein.state_dict(),
-                'label_map': label_map,  # 保存映射，便于复现/部署
+                'label_map': label_map,
             }, os.path.join(config.save_dir, 'distill_best.pth'))
 
         if early_stop(-va_acc, mode='min'):
-            print(f"[VkD-OPT-v2] Early stopping at epoch {epoch+1}")
+            print(f"[VkD-OPT-v3] Early stopping at epoch {epoch+1}")
             break
 
         scheduler.step()
@@ -415,4 +481,4 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v2'):
 if __name__ == '__main__':
     os.makedirs(config.save_dir, exist_ok=True)
     best = train_joint_distill()
-    print(f"[VkD-OPT-v2] Final best val acc: {best:.4f}%")
+    print(f"[VkD-OPT-v3] Final best val acc: {best:.4f}%")

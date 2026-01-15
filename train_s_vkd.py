@@ -245,7 +245,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
         {'params': cnn_palm_S.parameters(), 'lr': config.p2_enc_lr},
         {'params': cnn_vein_S.parameters(), 'lr': config.p2_enc_lr},
         {'params': fusion_S.parameters(),   'lr': config.p2_lr},
-        {'params': classifier_S.parameters(),'lr': config.p2_lr * 2.0},
+        {'params': classifier_S.parameters(),'lr': config.p2_lr * 4.0},
         {'params': proj_preproj.parameters(),'lr': config.p2_lr * 0.1, 'weight_decay': 0.0},
         {'params': proj_palm.parameters(),  'lr': config.p2_lr * 0.1, 'weight_decay': 0.0},
         {'params': proj_vein.parameters(),  'lr': config.p2_lr * 0.1, 'weight_decay': 0.0},
@@ -258,8 +258,8 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
 
     # Strategy:
     # - longer CE-only to get stronger baseline
-    ce_only_epochs = max(10, int(0.10 * config.p2_epochs))
-    warmup_epochs = max(20, int(0.20 * config.p2_epochs))
+    ce_only_epochs = 3  # v4-fast: 更早进入蒸馏
+    warmup_epochs = 10  # v4-fast: 蒸馏权重更快warmup
 
     # weights (make KL the main distill for classification, like VkD's gamma)
     beta_feat_max = 0.2        # feature KD (small)
@@ -269,7 +269,7 @@ def train_joint_distill(log_dir='runs_distill_vkd_opt_v4'):
     T = 2.0                    # temperature for KL
 
     # margin warmup longer (ArcFace is harder for small student)
-    margin_warmup_epochs = max(30, int(0.15 * config.p2_epochs))
+    margin_warmup_epochs = 60  # v4-fast: 更久时间保持小margin，XE下降更快
 
     scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
     early_stop = EarlyStopping(patience=config.p2_patience)

@@ -19,7 +19,7 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'mobilefacenet'  # 'tiny_mobilefacenet'   or 'mobilefacenet' 
+    backbone = 'tiny_mobilefacenet'  # 'tiny_mobilefacenet'   or 'mobilefacenet' 
     input_size = 224
     num_workers = 8
 
@@ -236,7 +236,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
             torch.save({
                 'model': model.state_dict(),          
                  'classifier': classifier.state_dict()                
-            }, os.path.join(config.save_dir, f'{model_name}_phase1_best.pth'))
+            }, os.path.join(config.save_dir, f'{model_name}_phase1_best_demo.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"Early stopping at epoch {epoch+1}")
@@ -247,7 +247,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
     for model, name in [(cnn_palm, 'cnn_palm'), (cnn_vein, 'cnn_vein')]:
-        ckpt_path = os.path.join(config.save_dir, f'{name}_phase1_best.pth')
+        ckpt_path = os.path.join(config.save_dir, f'{name}_phase1_best_demo.pth')
         if os.path.exists(ckpt_path):
             checkpoint = torch.load(ckpt_path, map_location=config.device)
             model.load_state_dict(checkpoint['model'])
@@ -372,7 +372,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 'cnn_palm': cnn_palm.state_dict(),
                 'cnn_vein': cnn_vein.state_dict(),
                 'fusion': fusion_model.state_dict(),
-            }, os.path.join(config.save_dir, 'stage2_best.pth'))
+            }, os.path.join(config.save_dir, 'stage2_best_demo.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"Early stopping at epoch {epoch+1}")

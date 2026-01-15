@@ -88,7 +88,7 @@ def get_transforms(img_size, strong=True):
             transforms.RandomRotation(5),
             transforms.RandomAffine(0, translate=(0.05, 0.05))
         ]
-    base += [transforms.ToTensor(), transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    base += [transforms.Grayscale(num_output_channels=3),transforms.ToTensor(), transforms.Normalize(mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5])
 ]
     return transforms.Compose(base)
 

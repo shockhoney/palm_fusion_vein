@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from models.student_fusion import Stage2FusionStudent_BottleneckGate    
-from utils.kd_loss import total_loss
 from train_teacher import config, build_backbone, create_phase2_dataloaders, EarlyStopping
 from models.stage2 import Stage2Fusion
 from utils.head import Arcface_Head
@@ -67,8 +66,8 @@ def train_joint_distill(log_dir='runs_distill'):
     classifier_S = Arcface_Head(
         embedding_size=512,
         num_classes=num_classes,
-        s=20.0,
-        m=0.10,
+        s=30.0,
+        m=0.20,
     ).to(config.device)
 
     params = [

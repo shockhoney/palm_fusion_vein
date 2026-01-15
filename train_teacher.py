@@ -29,9 +29,9 @@ class Config:
     phase2_val = 'txt-datasets/polyu_phase2_val.txt'
 
     p1_epochs, p1_batch, p1_lr = 200, 16, 1e-3
-    p1_patience = 50
+    p1_patience = 100
     p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 16, 1e-4, 1e-5
-    p2_patience = 50
+    p2_patience = 100
 
 config = Config()
 os.makedirs(config.save_dir, exist_ok=True)
@@ -393,8 +393,8 @@ def main():
 
     if not skip_stage1:
 
-        palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', feat_dim)
-        print(f" Palm(Best Acc: {palm_acc:.2f}%)")
+       # palm_acc = train_phase1(cnn_palm, config, writer, 'cnn_palm', feat_dim)
+       # print(f" Palm(Best Acc: {palm_acc:.2f}%)")
         vein_acc = train_phase1(cnn_vein, config, writer, 'cnn_vein', feat_dim)
         print(f" Vein(Best Acc: {vein_acc:.2f}%)")
 

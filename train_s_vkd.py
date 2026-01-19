@@ -150,7 +150,7 @@ def main():
             impostor_scores = np.array(impostor_scores)
             # 计算 EER 和各指定 FAR 下的 TAR
             val_eer = compute_eer(genuine_scores, impostor_scores)
-            far_points = [1e-3, 1e-4]  # 可根据需求添加 FAR=1e-2 等
+            far_points = [1e-1,1e-2,1e-3, 1e-4,1e-5]  # 可根据需求添加 FAR=1e-2 等
             tar_list = []
             for far in far_points:
                 tar_val = tar_at_far(genuine_scores, impostor_scores, far)

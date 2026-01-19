@@ -7,9 +7,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
-
 from models.student_mobilefacenet import TinyMobileFaceNet
-from models.student_mobilefacenet import  TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
 
@@ -19,7 +17,7 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'tiny_mobilefacenet'  # 'tiny_mobilefacenet'   or 'mobilefacenet' 
+    backbone = 'mobilefacenet'  # 'tiny_mobilefacenet'   or 'mobilefacenet' 
     input_size = 224
     num_workers = 8
 
@@ -372,7 +370,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 'cnn_palm': cnn_palm.state_dict(),
                 'cnn_vein': cnn_vein.state_dict(),
                 'fusion': fusion_model.state_dict(),
-            }, os.path.join(config.save_dir, 'stage2_best_demo.pth'))
+                'classifier': classifier.state_dict()
+            }, os.path.join(config.save_dir, 'stage2_best.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"Early stopping at epoch {epoch+1}")

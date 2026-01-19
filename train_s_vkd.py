@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from tqdm import tqdm
 
 from utils.datasets_txt import PairTxtDataset
 from utils.metrics import compute_eer, tar_at_far
@@ -19,7 +20,7 @@ from models.student_fusion import Stage2FusionStudent_BottleneckGate
 
 
 # -------------------------
-# utils: pair scores + metrics
+# pair scores
 # -------------------------
 def build_pair_scores(feats: np.ndarray, labels: np.ndarray):
     feats = feats.astype(np.float32)
@@ -33,20 +34,22 @@ def build_pair_scores(feats: np.ndarray, labels: np.ndarray):
 
 
 def get_tar_value(tar_ret):
-    # tar_at_far 在不同实现中可能返回 float 或 dict
+    # tar_at_far: some impl returns float, some returns dict
     if isinstance(tar_ret, dict):
         return float(tar_ret.get("TAR", tar_ret.get("tar", 0.0)))
     return float(tar_ret)
 
 
 @torch.no_grad()
-def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list):
+def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list, desc="Val"):
     cnn_palm.eval()
     cnn_vein.eval()
     fusion.eval()
 
     feats, labs = [], []
-    for palm, vein, y in loader:
+
+    pbar = tqdm(loader, desc=desc, dynamic_ncols=True, leave=False)
+    for palm, vein, y in pbar:
         palm = palm.to(device, non_blocking=True)
         vein = vein.to(device, non_blocking=True)
 
@@ -63,26 +66,36 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list):
 
     scores, pair_labels = build_pair_scores(feats, labs)
 
-    # 按你项目 test.py 的常见签名：compute_eer(scores, pair_labels, is_similarity=True, ...)
+    # --------- FIX: handle "no positive/negative pairs" ----------
+    pos = int((pair_labels == 1).sum())
+    neg = int((pair_labels == 0).sum())
+    if pos == 0 or neg == 0:
+        # return NaN metrics but do NOT crash training
+        msg = (
+            f"[WARN] Validation pairs invalid for EER/TAR: pos_pairs={pos}, neg_pairs={neg}. "
+            f"原因通常是 val_list 中每个身份只出现 1 次（无法形成 genuine pair），或协议不是“按身份两两配对”。\n"
+            f"建议：确保验证集每个身份至少2张，或使用 test.py 的 pair-protocol（同/不同对）文件进行评估。"
+        )
+        return float("nan"), [(far, float("nan")) for far in far_list], msg
+
+    # compute_eer/tar_at_far use metrics.py directly (same style as test.py)
     eer = compute_eer(scores, pair_labels, is_similarity=True)
 
-    tar_msg = []
+    tar_list = []
     for far in far_list:
         tar_ret = tar_at_far(scores, pair_labels, far, is_similarity=True)
-        tar_val = get_tar_value(tar_ret)
-        tar_msg.append((far, tar_val))
+        tar_list.append((far, get_tar_value(tar_ret)))
 
-    return float(eer), tar_msg
+    return float(eer), tar_list, ""
 
 
 # -------------------------
 # KD losses (concise)
 # -------------------------
-def cosine_kd(z_s, z_t):
+def cosine_kd_per_sample(z_s, z_t):
     z_s = F.normalize(z_s, dim=1)
     z_t = F.normalize(z_t, dim=1)
-    # per-sample (B,)
-    return 1.0 - (z_s * z_t).sum(dim=1)
+    return 1.0 - (z_s * z_t).sum(dim=1)  # (B,)
 
 
 def sim_matrix(z):
@@ -101,11 +114,25 @@ def weighted_relational_kd(z_s, z_t, w):
     return ((S_s - S_t) ** 2 * W).mean()
 
 
+def ramp(epoch, ramp_epochs):
+    if ramp_epochs <= 0:
+        return 1.0
+    return min(1.0, epoch / float(ramp_epochs))
+
+
+def safe_torch_load(path, device):
+    # Avoid torch.load warning in newer PyTorch if possible
+    try:
+        return torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
 def main():
     parser = argparse.ArgumentParser("Distill student (TinyMobileFaceNet) from teacher (MobileFaceNet)")
     parser.add_argument("--train_list", type=str, default="txt-datasets/polyu_phase2_train.txt")
     parser.add_argument("--val_list", type=str, default="txt-datasets/polyu_phase2_val.txt")
-    parser.add_argument("--teacher_ckpt", type=str, default="outputs/models/stage2_best.pth")
+    parser.add_argument("--teacher_ckpt", type=str, default="outputs/models/stage2_best_demo.pth")
     parser.add_argument("--save_dir", type=str, default="outputs/models")
 
     parser.add_argument("--epochs", type=int, default=200)
@@ -120,8 +147,6 @@ def main():
     parser.add_argument("--lambda_emb", type=float, default=2.0)
     parser.add_argument("--lambda_rel", type=float, default=2.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
-
-    # ramp-up (MoVE-KD style: gradually emphasize KD)
     parser.add_argument("--ramp_epochs", type=int, default=30)
 
     args = parser.parse_args()
@@ -141,7 +166,7 @@ def main():
     print(f"[Info] num_classes = {num_classes}")
 
     # -------------------------
-    # transforms (match teacher training style)
+    # transforms (match teacher style)
     # -------------------------
     tf_train = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -150,25 +175,29 @@ def main():
         transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.Grayscale(num_output_channels=3),
         transforms.ToTensor(),
-        transforms.Normalize([0.5]*3, [0.5]*3),
+        transforms.Normalize([0.5] * 3, [0.5] * 3),
     ])
     tf_val = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.Grayscale(num_output_channels=3),
         transforms.ToTensor(),
-        transforms.Normalize([0.5]*3, [0.5]*3),
+        transforms.Normalize([0.5] * 3, [0.5] * 3),
     ])
 
     train_set = PairTxtDataset(args.train_list, transform_palm=tf_train, transform_vein=tf_train)
     val_set = PairTxtDataset(args.val_list, transform_palm=tf_val, transform_vein=tf_val)
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True,
-                              num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
-                            num_workers=4, pin_memory=True)
+    train_loader = DataLoader(
+        train_set, batch_size=args.batch_size, shuffle=True, drop_last=True,
+        num_workers=4, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=args.batch_size, shuffle=False,
+        num_workers=4, pin_memory=True
+    )
 
     # -------------------------
-    # Teacher: MobileFaceNet + Stage2Fusion + classifier
+    # Teacher: MobileFaceNet + Stage2Fusion + classifier (all in ckpt)
     # -------------------------
     cnn_palm_T = MobileFaceNet(input_channel=3, input_size=224).to(device)
     cnn_vein_T = MobileFaceNet(input_channel=3, input_size=224).to(device)
@@ -177,8 +206,7 @@ def main():
     fusion_T = Stage2Fusion(in_dim_global=feat_dim_T, out_dim_final=512, final_l2norm=True).to(device)
     classifier_T = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
-    ckpt = torch.load(args.teacher_ckpt, map_location=device)
-
+    ckpt = safe_torch_load(args.teacher_ckpt, device)
     cnn_palm_T.load_state_dict(ckpt["cnn_palm"], strict=True)
     cnn_vein_T.load_state_dict(ckpt["cnn_vein"], strict=True)
     fusion_T.load_state_dict(ckpt["fusion"], strict=True)
@@ -208,11 +236,6 @@ def main():
     )
     ce = nn.CrossEntropyLoss()
 
-    def ramp_w(epoch):
-        if args.ramp_epochs <= 0:
-            return 1.0
-        return min(1.0, epoch / float(args.ramp_epochs))
-
     best_eer = 1e9
     best_path = os.path.join(args.save_dir, "student_best_distill.pth")
 
@@ -225,13 +248,15 @@ def main():
         fusion_S.train()
         classifier_S.train()
 
-        w = ramp_w(epoch)
+        w = ramp(epoch, args.ramp_epochs)
         lam_emb = args.lambda_emb * w
         lam_rel = args.lambda_rel * w
 
-        total_loss, total_n = 0.0, 0
+        epoch_loss = 0.0
+        seen = 0
 
-        for palm, vein, y in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", dynamic_ncols=True)
+        for palm, vein, y in pbar:
             palm = palm.to(device, non_blocking=True)
             vein = vein.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
@@ -241,23 +266,22 @@ def main():
                 fp_T = cnn_palm_T(palm, return_spatial=False)
                 fv_T = cnn_vein_T(vein, return_spatial=False)
                 z_T = fusion_T(fp_T, fv_T)  # (B,512)
-                # teacher confidence (MoVE-KD spirit: emphasize valuable samples)
                 logit_T = classifier_T(z_T, y)
                 conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
 
             # ---- student forward ----
             fp_S = cnn_palm_S(palm, return_spatial=False)
             fv_S = cnn_vein_S(vein, return_spatial=False)
-            z_S = fusion_S(fp_S, fv_S)  # (B,512)
+            z_S = fusion_S(fp_S, fv_S)
 
             logit_S = classifier_S(z_S, y)
             loss_cls = ce(logit_S, y)
 
-            # embedding KD (weighted)
-            emb_per = cosine_kd(z_S, z_T)                 # (B,)
+            # embedding KD (confidence-weighted)
+            emb_per = cosine_kd_per_sample(z_S, z_T)  # (B,)
             loss_emb = (emb_per * conf).sum() / (conf.sum() + 1e-6)
 
-            # relational KD (weighted)
+            # relational KD (confidence-weighted)
             loss_rel = weighted_relational_kd(z_S, z_T, conf)
 
             loss = args.lambda_cls * loss_cls + lam_emb * loss_emb + lam_rel * loss_rel
@@ -271,27 +295,39 @@ def main():
             optimizer.step()
 
             bs = palm.size(0)
-            total_loss += loss.item() * bs
-            total_n += bs
+            epoch_loss += loss.item() * bs
+            seen += bs
 
-        print(f"Epoch [{epoch}/{args.epochs}] loss={total_loss/max(total_n,1):.4f} "
-              f"| kd_w={w:.2f} (emb={lam_emb:.2f}, rel={lam_rel:.2f})")
+            pbar.set_postfix(loss=f"{loss.item():.4f}", kd_w=f"{w:.2f}", emb=f"{lam_emb:.2f}", rel=f"{lam_rel:.2f}")
+
+        avg_loss = epoch_loss / max(seen, 1)
+        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} | kd_w={w:.2f} (emb={lam_emb:.2f}, rel={lam_rel:.2f})")
 
         # ---- eval every N epochs ----
         if epoch % args.eval_every == 0:
-            eer, tar_list = evaluate_eer_tar(cnn_palm_S, cnn_vein_S, fusion_S, val_loader, device, args.far_list)
-            tar_str = " ".join([f"TAR@FAR={far:.0e}:{tar*100:.2f}%" for far, tar in tar_list])
-            print(f"[VAL] Epoch {epoch}: EER={eer*100:.2f}% | {tar_str}")
+            eer, tar_list, warn = evaluate_eer_tar(
+                cnn_palm_S, cnn_vein_S, fusion_S, val_loader, device, args.far_list, desc=f"Val@{epoch}"
+            )
 
-            if eer < best_eer:
-                best_eer = eer
-                torch.save({
-                    "cnn_palm": cnn_palm_S.state_dict(),
-                    "cnn_vein": cnn_vein_S.state_dict(),
-                    "fusion": fusion_S.state_dict(),
-                    "classifier": classifier_S.state_dict(),
-                }, best_path)
-                print(f"[SAVE] best_eer={best_eer*100:.2f}% -> {best_path}")
+            if warn:
+                print(warn)
+                print(f"[VAL] Epoch {epoch}: EER=NaN | " +
+                      " ".join([f"TAR@FAR={far:.0e}:NaN" for far, _ in tar_list]))
+            else:
+                tar_str = " ".join([f"TAR@FAR={far:.0e}:{tar*100:.2f}%" for far, tar in tar_list])
+                print(f"[VAL] Epoch {epoch}: EER={eer*100:.2f}% | {tar_str}")
+
+                if eer < best_eer:
+                    best_eer = eer
+                    torch.save({
+                        "cnn_palm": cnn_palm_S.state_dict(),
+                        "cnn_vein": cnn_vein_S.state_dict(),
+                        "fusion": fusion_S.state_dict(),
+                        "classifier": classifier_S.state_dict(),
+                        "epoch": epoch,
+                        "best_eer": best_eer
+                    }, best_path)
+                    print(f"[SAVE] best_eer={best_eer*100:.2f}% -> {best_path}")
 
     last_path = os.path.join(args.save_dir, "student_last_distill.pth")
     torch.save({
@@ -299,6 +335,8 @@ def main():
         "cnn_vein": cnn_vein_S.state_dict(),
         "fusion": fusion_S.state_dict(),
         "classifier": classifier_S.state_dict(),
+        "epoch": args.epochs,
+        "best_eer": best_eer
     }, last_path)
     print(f"[DONE] last={last_path}, best={best_path}")
 

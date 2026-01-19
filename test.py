@@ -20,8 +20,8 @@ class Config:
     nir_list = "txt-datasets/polyu__NIR_list.txt"
     red_list = "txt-datasets/polyu__Red_list.txt"
     phase2_pair_txt = "txt-datasets/polyu_phase2_test.txt"
-    backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
-    stage2_ckpt = os.path.join("outputs", "models", "stage2_best_demo.pth")
+    backbone ='mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
+    stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
 
 
 @torch.no_grad()

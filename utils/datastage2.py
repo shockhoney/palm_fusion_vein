@@ -98,12 +98,12 @@ def generate_phase2_lists(palm_file, vein_file, out_train, out_val, out_test=Non
 
 if __name__ == '__main__':
     # 配置文件路径
-    PALM_LIST = '/home/devops/works/pvf/palm_fusion_vein/polyu__Red_list.txt'
-    VEIN_LIST = '/home/devops/works/pvf/palm_fusion_vein/polyu__NIR_list.txt'
+    PALM_LIST = '/home/devops/works/pvf/palm_fusion_vein/utils/CUMT_vi_list.txt'
+    VEIN_LIST = '/home/devops/works/pvf/palm_fusion_vein/utils/CUMT_ir_list.txt'
 
     # 输出文件路径
     OUTPUT_TRAIN = 'polyu_phase2_train.txt'
     OUTPUT_VAL   = 'polyu_phase2_val.txt'
-    OUTPUT_TEST  = 'polyu_phase2_test.txt' # 可选
+    OUTPUT_TEST  = 'CASIA_phase2_test.txt' # 可选
 
     generate_phase2_lists(PALM_LIST, VEIN_LIST, OUTPUT_TRAIN, OUTPUT_VAL, OUTPUT_TEST)

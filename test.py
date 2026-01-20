@@ -22,7 +22,7 @@ class Config:
     phase2_pair_txt = "txt-datasets/polyu_phase2_test.txt"
     backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "student_last_distill.pth")
-
+ 
 
 @torch.no_grad()
 def extract_global_features(model: nn.Module, loader: DataLoader, device: str):

@@ -17,11 +17,11 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "utils/CUMT_ir_list.txt"
-    red_list = "utils/CUMT_vi_list.txt"
-    phase2_pair_txt = "utils/CUMT_phase2_test.txt"
+    nir_list = "txt-datasets/polyu__NIR_list.txt"
+    red_list = "txt-datasets/polyu__Red_list.txt"
+    phase2_pair_txt = "txt-datasets/polyu_phase2_test.txt"
     backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
-    stage2_ckpt = os.path.join("outputs", "models", "student_last_distill.pth")
+    stage2_ckpt = os.path.join("outputs", "models", "student_last_move_kd.pth")
  
 
 @torch.no_grad()

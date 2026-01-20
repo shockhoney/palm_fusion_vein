@@ -17,9 +17,9 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "txt-datasets/polyu__NIR_list.txt"
-    red_list = "txt-datasets/polyu__Red_list.txt"
-    phase2_pair_txt = "txt-datasets/polyu_phase2_test.txt"
+    nir_list = "utils/CUMT_ir_list.txt"
+    red_list = "utils/CUMT_vi_list.txt"
+    phase2_pair_txt = "utils/CUMT_phase2_test.txt"
     backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "student_last_distill.pth")
  
@@ -106,13 +106,7 @@ def main():
     cnn_vein, _, _ = build_backbone(cfg.backbone)
    # fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(device)
     
-    fusion_model = Stage2FusionStudent_BottleneckGate(
-              in_dim_global=feat_dim,  # 通常=256
-                 out_dim_final=512,
-                      bottleneck=128,            # 选128就一直保持
-                          gate_hidden=32,
-                              final_l2norm=True
-                              ).to(device)
+    fusion_model = Stage2FusionStudent_BottleneckGate( in_dim_global=feat_dim, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True).to(device)
 
 
     # 只需加载第二阶段checkpoint，里面含有第一阶段的模型权重和融合模型权重

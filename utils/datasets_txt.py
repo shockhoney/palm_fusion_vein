@@ -32,7 +32,7 @@ def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=
 
         for i, img_name in enumerate(imgs):
             if i < n_train:
-                split = "train"
+                split = "test"
             elif i < n_train + n_val:
                 split = "val"
             else:
@@ -176,8 +176,8 @@ class PairTxtDataset(Dataset):
 #     phase2_list(root_dir, train_txt, val_txt, val_ratio=0.2)
 
 if __name__ == '__main__':
-     gen_polyu_list("/home/devops/works/pvf/palm_fusion_vein/data/PolyU/NIR",
-    out_txt="polyu__Red_list.txt",
-    train_ratio=0.8,
-    val_ratio=0.1,
+     gen_polyu_list("/home/devops/works/pvf/palm_fusion_vein/data/CUMT_Mutltimodal/palmprint-test",
+    out_txt="CUMT_vi_list.txt",
+    train_ratio=1.0,
+    val_ratio=0.0,
     seed=42)

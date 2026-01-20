@@ -25,7 +25,7 @@ from models.student_fusion import Stage2FusionStudent_BottleneckGate
 def build_pair_scores(feats: np.ndarray, labels: np.ndarray):
     feats = feats.astype(np.float32)
     labels = labels.astype(np.int64)
-    sim = feats @ feats.T  # L2-normalized => cosine
+    sim = feats @ feats.T
     n = labels.shape[0]
     i, j = np.triu_indices(n, k=1)
     scores = sim[i, j].astype(np.float32)
@@ -51,8 +51,8 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list, desc=
         palm = palm.to(device, non_blocking=True)
         vein = vein.to(device, non_blocking=True)
 
-        fp = backbone_global(cnn_palm, palm)
-        fv = backbone_global(cnn_vein, vein)
+        fp = backbone_global(cnn_palm, palm)  # always (B,D)
+        fv = backbone_global(cnn_vein, vein)  # always (B,D)
         z = fusion(fp, fv)
         z = F.normalize(z, dim=1)
 
@@ -68,8 +68,8 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list, desc=
     if pos == 0 or neg == 0:
         msg = (
             f"[WARN] Validation pairs invalid for EER/TAR: pos_pairs={pos}, neg_pairs={neg}. "
-            f"通常是 val_list 中每个身份只出现 1 次（无法形成 genuine pair），或协议不是“按身份两两配对”。\n"
-            f"建议：确保验证集每个身份至少2张，或用 test.py 的 pair-protocol 做评估。"
+            f"通常是 val_list 中每个身份只出现 1 次导致没有 genuine pair。\n"
+            f"建议：确保验证集每个身份≥2张，或使用 test.py 的 pair-protocol 评估。"
         )
         return float("nan"), [(far, float("nan")) for far in far_list], msg
 
@@ -78,41 +78,76 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list, desc=
     for far in far_list:
         tar_ret = tar_at_far(scores, pair_labels, far, is_similarity=True)
         tar_list.append((far, get_tar_value(tar_ret)))
+
     return float(eer), tar_list, ""
 
 
 # -------------------------
-# backbone forward helpers (robust + concise)
+# backbone output adapters (关键修复：确保 fusion 输入永远是 (B,D))
 # -------------------------
+def _to_global(feat: torch.Tensor) -> torch.Tensor:
+    """
+    Convert feature to (B,D):
+      - (B,D) -> (B,D)
+      - (B,C,H,W) -> GAP -> (B,C)
+      - (B,N,D) -> mean token -> (B,D)
+    """
+    if feat.ndim == 2:
+        return feat
+    if feat.ndim == 4:
+        return F.adaptive_avg_pool2d(feat, 1).flatten(1)
+    if feat.ndim == 3:
+        return feat.mean(dim=1)
+    raise ValueError(f"Unsupported feature shape for global: {tuple(feat.shape)}")
+
+
+def _pick_first_tensor(out):
+    if torch.is_tensor(out):
+        return out
+    if isinstance(out, (tuple, list)):
+        for x in out:
+            if torch.is_tensor(x):
+                return x
+    return None
+
+
 def backbone_global(model, x):
+    """
+    Robustly get global embedding (B,D) from backbone.
+    """
+    out = None
     try:
-        out = model(x, return_spatial=True)
+        out = model(x, return_spatial=False)
     except TypeError:
         out = model(x)
-    if isinstance(out, (tuple, list)):
-        out = out[0]
-    return out
+
+    t = _pick_first_tensor(out)
+    if t is None:
+        raise ValueError("Backbone forward returned no tensor.")
+    return _to_global(t)
 
 
 def backbone_spatial(model, x):
     """
-    return: spatial feature map (B,C,H,W) or None if not supported
+    Try to get spatial map (B,C,H,W) for token KD.
+    - If model(x, return_spatial=True) returns (global, spatial) -> pick spatial
+    - If returns a tensor and it's 4D -> use it
+    Otherwise return None.
     """
     try:
         out = model(x, return_spatial=True)
     except TypeError:
         return None
 
-    # common patterns:
-    # 1) (global, spatial)
-    # 2) spatial only
-    if isinstance(out, (tuple, list)) and len(out) >= 2:
-        spatial = out[1]
-    else:
-        spatial = out
+    if torch.is_tensor(out) and out.ndim == 4:
+        return out
 
-    if torch.is_tensor(spatial) and spatial.ndim == 4:
-        return spatial
+    if isinstance(out, (tuple, list)):
+        # prefer 4D tensor
+        for item in out:
+            if torch.is_tensor(item) and item.ndim == 4:
+                return item
+
     return None
 
 
@@ -120,21 +155,17 @@ def backbone_spatial(model, x):
 # MoVE-KD style: token-weighted MSE (single teacher -> W_tea=1)
 # -------------------------
 def token_weight_from_teacher(t_tokens):
-    """
-    t_tokens: (B, N, D)
-    token weight ~ softmax(token energy)
-    """
+    # t_tokens: (B,N,D)
     score = t_tokens.pow(2).mean(dim=-1)  # (B,N)
     return F.softmax(score, dim=1)        # (B,N)
 
 
 def token_weighted_mse(t_tokens, s_tokens, add_uniform=True):
     """
-    Implements: sum_j (w_tok_j + 1/N) * MSE(t_j, s_j)
-    t_tokens/s_tokens: (B,N,D)
+    L = sum_j (w_j + 1/N) * MSE(t_j, s_j)
     """
     b, n, _ = t_tokens.shape
-    w = token_weight_from_teacher(t_tokens).detach()  # teacher-provided weights
+    w = token_weight_from_teacher(t_tokens).detach()
     if add_uniform:
         w = w + (1.0 / float(n))
     mse_tok = (t_tokens - s_tokens).pow(2).mean(dim=-1)  # (B,N)
@@ -143,9 +174,9 @@ def token_weighted_mse(t_tokens, s_tokens, add_uniform=True):
 
 def flatten_tokens(feat_4d, target_hw=None):
     """
-    feat_4d: (B,C,H,W) -> (B,N,C), optionally resize to target_hw
+    (B,C,H,W) -> (B,N,C)
     """
-    if target_hw is not None and (feat_4d.shape[-2:] != target_hw):
+    if target_hw is not None and feat_4d.shape[-2:] != target_hw:
         feat_4d = F.interpolate(feat_4d, size=target_hw, mode="bilinear", align_corners=False)
     b, c, h, w = feat_4d.shape
     return feat_4d.permute(0, 2, 3, 1).reshape(b, h * w, c), (h, w)
@@ -153,13 +184,14 @@ def flatten_tokens(feat_4d, target_hw=None):
 
 class TokenProjector(nn.Module):
     """
-    Minimal 'encoder adapter' for MoVE-KD:
-    project per-token/channel to a unified KD dim.
+    Minimal adapter:
+      - spatial: LazyConv2d -> kd_dim
+      - fusion vector: Linear(512 -> kd_dim)
     """
     def __init__(self, kd_dim: int):
         super().__init__()
         self.proj2d = nn.LazyConv2d(kd_dim, kernel_size=1, bias=False)
-        self.proj1d = nn.Linear(512, kd_dim, bias=False)  # fusion output is 512-d
+        self.proj1d = nn.Linear(512, kd_dim, bias=False)
 
     def proj_spatial(self, feat_4d):
         return self.proj2d(feat_4d)
@@ -181,8 +213,11 @@ def safe_torch_load(path, device):
         return torch.load(path, map_location=device)
 
 
+# -------------------------
+# main
+# -------------------------
 def main():
-    parser = argparse.ArgumentParser("MoVE-KD style distillation (token-weighted) for palm+vein fusion")
+    parser = argparse.ArgumentParser("MoVE-KD distillation for palm+vein fusion")
     parser.add_argument("--train_list", type=str, default="txt-datasets/polyu_phase2_train.txt")
     parser.add_argument("--val_list", type=str, default="txt-datasets/polyu_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/models/stage2_best.pth")
@@ -196,13 +231,11 @@ def main():
     parser.add_argument("--eval_every", type=int, default=5)
     parser.add_argument("--far_list", type=float, nargs="+", default=[1e-3, 1e-4, 1e-5])
 
-    # MoVE-KD style KD
-    parser.add_argument("--kd_w", type=float, default=1.0, help="overall KD weight")
-    parser.add_argument("--kd_dim", type=int, default=128, help="unified token dim for KD adapters")
-    parser.add_argument("--add_uniform", action="store_true", help="add +1/N term as in MoVE-KD")
-    parser.add_argument("--ramp_epochs", type=int, default=30, help="KD weight ramp-up epochs")
+    parser.add_argument("--kd_w", type=float, default=1.0)
+    parser.add_argument("--kd_dim", type=int, default=128)
+    parser.add_argument("--add_uniform", action="store_true")
+    parser.add_argument("--ramp_epochs", type=int, default=30)
 
-    # classification weight (ArcFace CE)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
 
     args = parser.parse_args()
@@ -244,7 +277,7 @@ def main():
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False,
                             num_workers=4, pin_memory=True)
 
-    # Teacher (frozen)
+    # Teacher (frozen): MobileFaceNet + fusion + classifier
     cnn_palm_T = MobileFaceNet(input_channel=3, input_size=224).to(device)
     cnn_vein_T = MobileFaceNet(input_channel=3, input_size=224).to(device)
     feat_dim_T = cnn_palm_T.out_dim
@@ -269,9 +302,9 @@ def main():
     fusion_S = Stage2FusionStudent_BottleneckGate(in_dim_global=feat_dim_S, out_dim_final=512, final_l2norm=True).to(device)
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
-    # MoVE-KD style adapters (encoder adapters / unified space)
-    proj_T = TokenProjector(args.kd_dim).to(device)  # teacher tokens -> kd_dim
-    proj_S = TokenProjector(args.kd_dim).to(device)  # student tokens -> kd_dim
+    # MoVE-KD adapters
+    proj_T = TokenProjector(args.kd_dim).to(device)
+    proj_S = TokenProjector(args.kd_dim).to(device)
 
     optimizer = torch.optim.AdamW(
         list(cnn_palm_S.parameters()) + list(cnn_vein_S.parameters()) +
@@ -282,79 +315,73 @@ def main():
     ce = nn.CrossEntropyLoss()
 
     best_eer = 1e9
-    best_path = os.path.join(args.save_dir, "student_best_distill_move_kd.pth")
+    best_path = os.path.join(args.save_dir, "student_best_move_kd.pth")
 
-    warned_no_spatial = False
+    warned_spatial = False
 
     for epoch in range(1, args.epochs + 1):
-        cnn_palm_S.train()
-        cnn_vein_S.train()
-        fusion_S.train()
-        classifier_S.train()
-        proj_T.train()
-        proj_S.train()
+        cnn_palm_S.train(); cnn_vein_S.train(); fusion_S.train(); classifier_S.train()
+        proj_T.train(); proj_S.train()
 
         kd_scale = args.kd_w * ramp(epoch, args.ramp_epochs)
 
-        epoch_loss = 0.0
-        seen = 0
-
+        total_loss, seen = 0.0, 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", dynamic_ncols=True)
+
         for palm, vein, y in pbar:
             palm = palm.to(device, non_blocking=True)
             vein = vein.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
-            # ---- teacher (no grad) ----
+            # teacher
             with torch.no_grad():
-                fp_T_g = backbone_global(cnn_palm_T, palm)
+                fp_T_g = backbone_global(cnn_palm_T, palm)  # (B,D) guaranteed
                 fv_T_g = backbone_global(cnn_vein_T, vein)
-                z_T = fusion_T(fp_T_g, fv_T_g)  # (B,512)
+                z_T = fusion_T(fp_T_g, fv_T_g)              # now safe: (B,512)
 
-                # spatial tokens (for MoVE-KD token-weighted KD)
-                fp_T_s = backbone_spatial(cnn_palm_T, palm)
+                fp_T_s = backbone_spatial(cnn_palm_T, palm)  # (B,C,H,W) or None
                 fv_T_s = backbone_spatial(cnn_vein_T, vein)
 
-            # ---- student ----
+            # student
             fp_S_g = backbone_global(cnn_palm_S, palm)
             fv_S_g = backbone_global(cnn_vein_S, vein)
-            z_S = fusion_S(fp_S_g, fv_S_g)  # (B,512)
+            z_S = fusion_S(fp_S_g, fv_S_g)
 
-            logit_S = classifier_S(z_S, y)
-            loss_cls = ce(logit_S, y)
+            # cls
+            logits_S = classifier_S(z_S, y)
+            loss_cls = ce(logits_S, y)
 
-            # ---- MoVE-KD style KD loss (token-weighted MSE) ----
-            kd_losses = []
+            # MoVE-KD: token-weighted MSE
+            kd_parts = []
 
-            # fusion (single token): use weighted_mse with N=1 (equivalent to MSE * (1+1))
+            # fusion vector KD (simple MSE in KD space)
             t_f = proj_T.proj_fusion(z_T)
             s_f = proj_S.proj_fusion(z_S)
-            kd_losses.append(((t_f - s_f) ** 2).mean())
+            kd_parts.append(F.mse_loss(s_f, t_f))
 
-            # palm spatial tokens
+            # palm token KD
             fp_S_s = backbone_spatial(cnn_palm_S, palm)
             if fp_T_s is not None and fp_S_s is not None:
                 t_map = proj_T.proj_spatial(fp_T_s)
                 s_map = proj_S.proj_spatial(fp_S_s)
                 t_tok, hw = flatten_tokens(t_map)
                 s_tok, _ = flatten_tokens(s_map, target_hw=hw)
-                kd_losses.append(token_weighted_mse(t_tok, s_tok, add_uniform=args.add_uniform))
-            elif not warned_no_spatial:
-                warned_no_spatial = True
-                print("[WARN] backbone_spatial() not supported by your MobileFaceNet/TinyMobileFaceNet implementation. "
-                      "Spatial token KD will be skipped; only fusion KD is used. "
-                      "若要启用 MoVE-KD 的 token KD，请确保 backbone(return_spatial=True) 返回 (global, spatial(B,C,H,W)).")
+                kd_parts.append(token_weighted_mse(t_tok, s_tok, add_uniform=args.add_uniform))
+            elif not warned_spatial:
+                warned_spatial = True
+                print("[WARN] backbone_spatial() 返回 None，说明你的 backbone 不支持 return_spatial=True 输出特征图。"
+                      "此时将只做 fusion 向量 KD（仍可训练，但不完全等价 MoVE-KD token KD）。")
 
-            # vein spatial tokens
+            # vein token KD
             fv_S_s = backbone_spatial(cnn_vein_S, vein)
             if fv_T_s is not None and fv_S_s is not None:
                 t_map = proj_T.proj_spatial(fv_T_s)
                 s_map = proj_S.proj_spatial(fv_S_s)
                 t_tok, hw = flatten_tokens(t_map)
                 s_tok, _ = flatten_tokens(s_map, target_hw=hw)
-                kd_losses.append(token_weighted_mse(t_tok, s_tok, add_uniform=args.add_uniform))
+                kd_parts.append(token_weighted_mse(t_tok, s_tok, add_uniform=args.add_uniform))
 
-            loss_kd = sum(kd_losses) / float(len(kd_losses))
+            loss_kd = sum(kd_parts) / float(len(kd_parts))
             loss = args.lambda_cls * loss_cls + kd_scale * loss_kd
 
             optimizer.zero_grad(set_to_none=True)
@@ -366,14 +393,12 @@ def main():
             optimizer.step()
 
             bs = palm.size(0)
-            epoch_loss += loss.item() * bs
+            total_loss += loss.item() * bs
             seen += bs
             pbar.set_postfix(loss=f"{loss.item():.4f}", cls=f"{loss_cls.item():.4f}", kd=f"{loss_kd.item():.4f}", kd_w=f"{kd_scale:.2f}")
 
-        avg_loss = epoch_loss / max(seen, 1)
-        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} | kd_w={kd_scale:.2f}")
+        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={total_loss/max(seen,1):.4f} | kd_w={kd_scale:.2f}")
 
-        # eval
         if epoch % args.eval_every == 0:
             eer, tar_list, warn = evaluate_eer_tar(
                 cnn_palm_S, cnn_vein_S, fusion_S, val_loader, device, args.far_list, desc=f"Val@{epoch}"
@@ -400,7 +425,7 @@ def main():
                     }, best_path)
                     print(f"[SAVE] best_eer={best_eer*100:.2f}% -> {best_path}")
 
-    last_path = os.path.join(args.save_dir, "student_last_distill_move_kd.pth")
+    last_path = os.path.join(args.save_dir, "student_last_move_kd.pth")
     torch.save({
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),

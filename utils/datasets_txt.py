@@ -176,7 +176,7 @@ class PairTxtDataset(Dataset):
 #     phase2_list(root_dir, train_txt, val_txt, val_ratio=0.2)
 
 if __name__ == '__main__':
-     gen_polyu_list("/home/devops/works/pvf/palm_fusion_vein/data/CUMT_Mutltimodal/palmprint-test",
+     gen_polyu_list("/home/devops/works/pvf/palm_fusion_vein/data/CUMT_Multimodal/palmprint-test",
     out_txt="CUMT_vi_list.txt",
     train_ratio=1.0,
     val_ratio=0.0,

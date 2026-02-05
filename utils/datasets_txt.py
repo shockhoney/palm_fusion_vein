@@ -32,7 +32,7 @@ def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=
 
         for i, img_name in enumerate(imgs):
             if i < n_train:
-                split = "test"
+                split = "train"
             elif i < n_train + n_val:
                 split = "val"
             else:

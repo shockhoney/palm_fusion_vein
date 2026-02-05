@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from tqdm import tqdm
 
@@ -152,6 +153,7 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "runs_distill"))
 
     # -------------------------
     # num_classes from train_list
@@ -302,6 +304,7 @@ def main():
 
         avg_loss = epoch_loss / max(seen, 1)
         print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} | kd_w={w:.2f} (emb={lam_emb:.2f}, rel={lam_rel:.2f})")
+        writer.add_scalar("train/loss", avg_loss, epoch)
 
         # ---- eval every N epochs ----
         if epoch % args.eval_every == 0:
@@ -315,6 +318,9 @@ def main():
                       " ".join([f"TAR@FAR={far:.0e}:NaN" for far, _ in tar_list]))
             else:
                 tar_str = " ".join([f"TAR@FAR={far:.0e}:{tar*100:.2f}%" for far, tar in tar_list])
+                writer.add_scalar("val/EER", eer, epoch)
+                for far, tar in tar_list:
+                    writer.add_scalar(f"val/TAR@FAR_{far:.0e}", tar, epoch)
                 print(f"[VAL] Epoch {epoch}: EER={eer*100:.2f}% | {tar_str}")
 
                 if eer < best_eer:
@@ -338,6 +344,7 @@ def main():
         "epoch": args.epochs,
         "best_eer": best_eer
     }, last_path)
+    writer.close()
     print(f"[DONE] last={last_path}, best={best_path}")
 
 

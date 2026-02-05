@@ -104,6 +104,6 @@ if __name__ == '__main__':
     # 输出文件路径
     OUTPUT_TRAIN = 'polyu_phase2_train.txt'
     OUTPUT_VAL   = 'polyu_phase2_val.txt'
-    OUTPUT_TEST  = 'CASIA_phase2_test.txt' # 可选
+    OUTPUT_TEST  = 'polyu_phase2_test.txt' # 可选
 
     generate_phase2_lists(PALM_LIST, VEIN_LIST, OUTPUT_TRAIN, OUTPUT_VAL, OUTPUT_TEST)

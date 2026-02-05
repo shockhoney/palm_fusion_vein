@@ -12,5 +12,5 @@ utils/__pycache__/
 # outputs/models/ 
 
 #txtfiles
-*.txt
+
 !requirements.txt

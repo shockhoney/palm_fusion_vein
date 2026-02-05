@@ -21,10 +21,10 @@ class Config:
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'txt-datasets/polyu__Red_list.txt'
-    list_file_vein = 'txt-datasets/polyu__NIR_list.txt'
-    phase2_train = 'txt-datasets/polyu_phase2_train.txt'
-    phase2_val = 'txt-datasets/polyu_phase2_val.txt'
+    list_file_palm = 'polyu_Red_list.txt'
+    list_file_vein = 'polyu_NIR_list.txt'
+    phase2_train = 'polyu_phase2_train.txt'
+    phase2_val = 'polyu_phase2_val.txt'
 
     p1_epochs, p1_batch, p1_lr = 200, 16, 1e-3
     p1_patience = 100

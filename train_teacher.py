@@ -21,8 +21,8 @@ class Config:
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'polyu_Red_list.txt'
-    list_file_vein = 'polyu_NIR_list.txt'
+    list_file_palm = 'polyuu_Red_list.txt'
+    list_file_vein = 'PolyU_NIR_list.txt'
     phase2_train = 'polyu_phase2_train.txt'
     phase2_val = 'polyu_phase2_val.txt'
 

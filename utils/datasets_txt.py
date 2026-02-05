@@ -175,15 +175,10 @@ class PairTxtDataset(Dataset):
 #     val_txt   = "casia_phase2_val.txt"
 #     phase2_list(root_dir, train_txt, val_txt, val_ratio=0.2)
 
-# if __name__ == '__main__':
-  #    gen_polyu_list("/data-ext-c/palm_fusion_vein/data/PolyU/NIR",
-   #  out_txt="PolyU_NIR_list.txt",
-   #  train_ratio=1.0,
-   #  val_ratio=0.0,
-   #  seed=42)
- if __name__ == '__main__':
-      gen_polyu_list("/data-ext-c/palm_fusion_vein/data/PolyU/Red",
-     out_txt="PolyU_Red_list.txt",
-     train_ratio=1.0,
-     val_ratio=0.0,
-     seed=42)
+if __name__ == '__main__':
+     gen_polyu_list("/data-ext-c/palm_fusion_vein/data/PolyU/Red",
+    out_txt="PolyU_Red_list.txt",
+    train_ratio=1.0,
+    val_ratio=0.0,
+    seed=42)
+

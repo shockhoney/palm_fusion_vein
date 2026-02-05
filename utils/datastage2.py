@@ -98,8 +98,8 @@ def generate_phase2_lists(palm_file, vein_file, out_train, out_val, out_test=Non
 
 if __name__ == '__main__':
     # 配置文件路径
-    PALM_LIST = '/home/devops/works/pvf/palm_fusion_vein/utils/CUMT_vi_list.txt'
-    VEIN_LIST = '/home/devops/works/pvf/palm_fusion_vein/utils/CUMT_ir_list.txt'
+    PALM_LIST = '/data-ext-c/palm_fusion_vein//utils/PolyU_NIR_list.txt'
+    VEIN_LIST = '/data-ext-c/palm_fusion_vein//utils/PolyU_Red_list.txt'
 
     # 输出文件路径
     OUTPUT_TRAIN = 'polyu_phase2_train.txt'

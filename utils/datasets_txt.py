@@ -1,8 +1,8 @@
 import os
 import random
 from PIL import Image
-from torch.utils.data import Dataset
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp')
 
 def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=0.1,seed=42):
@@ -38,7 +38,7 @@ def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=
             else:
                 split = "test"
 
-            img_path = os.path.join(person_dir, img_name)
+            img_path = os.path.relpath(os.path.join(person_dir, img_name)).replace("\\", "/")
             label = pid2label[pid]
 
             lines.append(f"{img_path} {label} {split}\n")
@@ -46,7 +46,7 @@ def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=
     with open(out_txt, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-class TxtImageDataset(Dataset):
+class TxtImageDataset:
 
     def __init__(self, list_file, split="train", transform=None):
         self.samples = []    
@@ -110,8 +110,8 @@ def phase2_list(root_dir,train_txt,val_txt,val_ratio = 0.2,seed = 42):
         person_str = parts[0]          
         label = int(person_str) - 1
 
-        ir_path_norm = ir_path.replace("\\", "/")
-        vi_path_norm = vi_path.replace("\\", "/")
+        ir_path_norm = os.path.relpath(ir_path).replace("\\", "/")
+        vi_path_norm = os.path.relpath(vi_path).replace("\\", "/")
 
         pairs.append(f"{ir_path_norm} {vi_path_norm} {label}\n")
 
@@ -130,7 +130,7 @@ def phase2_list(root_dir,train_txt,val_txt,val_ratio = 0.2,seed = 42):
     with open(val_txt, "w", encoding="utf-8") as f:
         f.writelines(val_pairs)
 
-class PairTxtDataset(Dataset):
+class PairTxtDataset:
 
     def __init__(self, list_file, transform_palm=None, transform_vein=None):
         self.samples = []  # 结构: (palm_path, vein_path, label)
@@ -176,9 +176,15 @@ class PairTxtDataset(Dataset):
 #     phase2_list(root_dir, train_txt, val_txt, val_ratio=0.2)
 
 if __name__ == '__main__':
-     gen_polyu_list("/data-ext-c/palm_fusion_vein/data/PolyU/Red",
-    out_txt="PolyU_Red_list.txt",
-    train_ratio=0.8,
-    val_ratio=0.1,
-    seed=42)
+    os.chdir(PROJECT_ROOT)
+    gen_polyu_list("data/CUMT/palmprint",
+        out_txt="data_txt/CUMT_palmprint_list.txt",
+        train_ratio=0.8,
+        val_ratio=0.1,
+        seed=42)
+    gen_polyu_list("data/CUMT/palmvein",
+        out_txt="data_txt/CUMT_palmvein_list.txt",
+        train_ratio=0.8,
+        val_ratio=0.1,
+        seed=42)
 

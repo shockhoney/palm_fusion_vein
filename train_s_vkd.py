@@ -42,52 +42,60 @@ def get_tar_value(tar_ret):
 
 
 @torch.no_grad()
-def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list, desc="Val"):
+def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
+                    classifier=None, ce_fn=None, desc="Val"):
     cnn_palm.eval()
     cnn_vein.eval()
     fusion.eval()
 
     feats, labs = [], []
+    total_loss, correct, seen = 0.0, 0, 0
 
     pbar = tqdm(loader, desc=desc, dynamic_ncols=True, leave=False)
     for palm, vein, y in pbar:
         palm = palm.to(device, non_blocking=True)
         vein = vein.to(device, non_blocking=True)
+        y_dev = y.to(device, non_blocking=True)
 
         fp = cnn_palm(palm, return_spatial=False)
         fv = cnn_vein(vein, return_spatial=False)
         z = fusion(fp, fv)
         z = F.normalize(z, dim=1)
 
+        # loss & acc
+        if classifier is not None and ce_fn is not None:
+            logit = classifier(z, y_dev)
+            total_loss += ce_fn(logit, y_dev).item() * palm.size(0)
+            correct += (logit.argmax(1) == y_dev).sum().item()
+
         feats.append(z.cpu().numpy())
         labs.append(y.numpy())
+        seen += palm.size(0)
 
     feats = np.vstack(feats)
     labs = np.concatenate(labs, axis=0)
+    val_loss = total_loss / max(seen, 1)
+    val_acc = correct / max(seen, 1)
 
     scores, pair_labels = build_pair_scores(feats, labs)
 
-    # --------- FIX: handle "no positive/negative pairs" ----------
     pos = int((pair_labels == 1).sum())
     neg = int((pair_labels == 0).sum())
     if pos == 0 or neg == 0:
-        # return NaN metrics but do NOT crash training
         msg = (
             f"[WARN] Validation pairs invalid for EER/TAR: pos_pairs={pos}, neg_pairs={neg}. "
             f"原因通常是 val_list 中每个身份只出现 1 次（无法形成 genuine pair），或协议不是“按身份两两配对”。\n"
             f"建议：确保验证集每个身份至少2张，或使用 test.py 的 pair-protocol（同/不同对）文件进行评估。"
         )
-        return float("nan"), [(far, float("nan")) for far in far_list], msg
+        return float("nan"), [(far, float("nan")) for far in far_list], msg, val_loss, val_acc
 
-    # compute_eer/tar_at_far use metrics.py directly (same style as test.py)
     eer = compute_eer(scores, pair_labels, is_similarity=True)
-
     tar_list = []
     for far in far_list:
         tar_ret = tar_at_far(scores, pair_labels, far, is_similarity=True)
         tar_list.append((far, get_tar_value(tar_ret)))
 
-    return float(eer), tar_list, ""
+    return float(eer), tar_list, "", val_loss, val_acc
 
 
 # -------------------------
@@ -255,6 +263,10 @@ def main():
         lam_rel = args.lambda_rel * w
 
         epoch_loss = 0.0
+        epoch_cls = 0.0
+        epoch_emb = 0.0
+        epoch_rel = 0.0
+        correct = 0
         seen = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", dynamic_ncols=True)
@@ -298,30 +310,41 @@ def main():
 
             bs = palm.size(0)
             epoch_loss += loss.item() * bs
+            epoch_cls += loss_cls.item() * bs
+            epoch_emb += loss_emb.item() * bs
+            epoch_rel += loss_rel.item() * bs
+            correct += (logit_S.argmax(1) == y).sum().item()
             seen += bs
 
             pbar.set_postfix(loss=f"{loss.item():.4f}", kd_w=f"{w:.2f}", emb=f"{lam_emb:.2f}", rel=f"{lam_rel:.2f}")
 
         avg_loss = epoch_loss / max(seen, 1)
-        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} | kd_w={w:.2f} (emb={lam_emb:.2f}, rel={lam_rel:.2f})")
+        train_acc = correct / max(seen, 1)
+        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | kd_w={w:.2f}")
         writer.add_scalar("train/loss", avg_loss, epoch)
+        writer.add_scalar("train/loss_cls", epoch_cls / max(seen, 1), epoch)
+        writer.add_scalar("train/loss_emb", epoch_emb / max(seen, 1), epoch)
+        writer.add_scalar("train/loss_rel", epoch_rel / max(seen, 1), epoch)
+        writer.add_scalar("train/acc", train_acc, epoch)
 
         # ---- eval every N epochs ----
         if epoch % args.eval_every == 0:
-            eer, tar_list, warn = evaluate_eer_tar(
-                cnn_palm_S, cnn_vein_S, fusion_S, val_loader, device, args.far_list, desc=f"Val@{epoch}"
+            eer, tar_list, warn, v_loss, v_acc = evaluate_eer_tar(
+                cnn_palm_S, cnn_vein_S, fusion_S, val_loader, device, args.far_list,
+                classifier=classifier_S, ce_fn=ce, desc=f"Val@{epoch}"
             )
+            writer.add_scalar("val/loss", v_loss, epoch)
+            writer.add_scalar("val/acc", v_acc, epoch)
 
             if warn:
                 print(warn)
-                print(f"[VAL] Epoch {epoch}: EER=NaN | " +
-                      " ".join([f"TAR@FAR={far:.0e}:NaN" for far, _ in tar_list]))
+                print(f"[VAL] Epoch {epoch}: loss={v_loss:.4f} acc={v_acc*100:.2f}% EER=NaN")
             else:
                 tar_str = " ".join([f"TAR@FAR={far:.0e}:{tar*100:.2f}%" for far, tar in tar_list])
                 writer.add_scalar("val/EER", eer, epoch)
                 for far, tar in tar_list:
                     writer.add_scalar(f"val/TAR@FAR_{far:.0e}", tar, epoch)
-                print(f"[VAL] Epoch {epoch}: EER={eer*100:.2f}% | {tar_str}")
+                print(f"[VAL] Epoch {epoch}: loss={v_loss:.4f} acc={v_acc*100:.2f}% EER={eer*100:.2f}% | {tar_str}")
 
                 if eer < best_eer:
                     best_eer = eer

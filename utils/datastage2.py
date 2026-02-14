@@ -1,5 +1,7 @@
 import os
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 def parse_list_file(file_path):
     """
     解析列表文件，返回一个字典。
@@ -97,13 +99,14 @@ def generate_phase2_lists(palm_file, vein_file, out_train, out_val, out_test=Non
     print("-" * 30)
 
 if __name__ == '__main__':
+    os.chdir(PROJECT_ROOT)
     # 配置文件路径
-    PALM_LIST = '/data-ext-c/palm_fusion_vein//utils/PolyU_NIR_list.txt'
-    VEIN_LIST = '/data-ext-c/palm_fusion_vein//utils/PolyU_Red_list.txt'
+    PALM_LIST = 'data_txt/CUMT_palmprint_list.txt'
+    VEIN_LIST = 'data_txt/CUMT_palmvein_list.txt'
 
     # 输出文件路径
-    OUTPUT_TRAIN = 'polyu_phase2_train.txt'
-    OUTPUT_VAL   = 'polyu_phase2_val.txt'
-    OUTPUT_TEST  = 'polyu_phase2_test.txt' # 可选
+    OUTPUT_TRAIN = 'data_txt/CUMT_phase2_train.txt'
+    OUTPUT_VAL   = 'data_txt/CUMT_phase2_val.txt'
+    OUTPUT_TEST  = 'data_txt/CUMT_phase2_test.txt' # 可选
 
     generate_phase2_lists(PALM_LIST, VEIN_LIST, OUTPUT_TRAIN, OUTPUT_VAL, OUTPUT_TEST)

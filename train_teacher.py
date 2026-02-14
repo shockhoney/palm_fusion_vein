@@ -17,14 +17,14 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'mobilefacenet'  # 'tiny_mobilefacenet'   or 'mobilefacenet' 
+    backbone = 'mobilefacenet'  
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'PolyU_Red_list.txt'
-    list_file_vein = 'PolyU_NIR_list.txt'
-    phase2_train = 'polyu_phase2_train.txt'
-    phase2_val = 'polyu_phase2_val.txt'
+    list_file_palm = 'data_txt/CASIA_vi_list.txt'
+    list_file_vein = 'data_txt/CASIA_ir_list.txt'
+    phase2_train = 'data_txt/casia_phase2_train.txt'
+    phase2_val = 'data_txt/casia_phase2_val.txt'
 
     p1_epochs, p1_batch, p1_lr = 200, 16, 1e-3
     p1_patience = 100

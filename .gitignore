@@ -13,3 +13,7 @@ utils/__pycache__/
 #txtfiles
 
 !requirements.txt
+
+# 论文
+article.tex
+

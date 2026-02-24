@@ -17,9 +17,9 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "data_txt/tongji_vein_session1_list.txt"
-    red_list = "data_txt/tongji_palm_session1_list.txt"
-    phase2_pair_txt = "data_txt/tongji_session1_phase2_test.txt"
+    nir_list = "data_txt/tongji_palmvein_list.txt"
+    red_list = "data_txt/tongji_palmprint_list.txt"
+    phase2_pair_txt = "data_txt/tongji_phase2_test.txt"
     backbone ='mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "stage2_best.pth")
  

@@ -26,9 +26,9 @@ class Config:
     phase2_train = 'data_txt/CUMT_phase2_train.txt'
     phase2_val = 'data_txt/CUMT_phase2_val.txt'
 
-    p1_epochs, p1_batch, p1_lr = 200, 16, 1e-3
+    p1_epochs, p1_batch, p1_lr = 200, 8, 1e-4
     p1_patience = 100
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 16, 1e-4, 1e-5
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 8, 1e-4, 1e-5
     p2_patience = 100
 
 config = Config()
@@ -140,7 +140,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
 
     train_loader, val_loader, num_classes = create_dataloaders_from_txt(list_file, config.p1_batch)
 
-    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=32.0,m=0.30).to(config.device)
+    classifier = Arcface_Head(embedding_size=feat_dim,num_classes=num_classes,s=32.0,m=0.25).to(config.device)
 
     # classifier = nn.Linear(feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()

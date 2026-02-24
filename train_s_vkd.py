@@ -145,8 +145,8 @@ def main():
     parser.add_argument("--save_dir", type=str, default="outputs/models")
 
     parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--wd", type=float, default=1e-4)
 
     parser.add_argument("--eval_every", type=int, default=5)
@@ -156,7 +156,7 @@ def main():
     parser.add_argument("--lambda_emb", type=float, default=2.0)
     parser.add_argument("--lambda_rel", type=float, default=2.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
-    parser.add_argument("--ramp_epochs", type=int, default=30)
+    parser.add_argument("--ramp_epochs", type=int, default=20)
 
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)

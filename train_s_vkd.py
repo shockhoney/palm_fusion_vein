@@ -139,8 +139,8 @@ def safe_torch_load(path, device):
 
 def main():
     parser = argparse.ArgumentParser("Distill student (TinyMobileFaceNet) from teacher (MobileFaceNet)")
-    parser.add_argument("--train_list", type=str, default="data_txt/tongji_session1_phase2_train.txt")
-    parser.add_argument("--val_list", type=str, default="data_txt/tongji_session1_phase2_val.txt")
+    parser.add_argument("--train_list", type=str, default="data_txt/tongji_phase2_train.txt")
+    parser.add_argument("--val_list", type=str, default="data_txt/tongji_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/models/stage2_best.pth")
     parser.add_argument("--save_dir", type=str, default="outputs/models")
 

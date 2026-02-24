@@ -21,10 +21,10 @@ class Config:
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'data_txt/tongji_palm_session1_list.txt'
-    list_file_vein = 'data_txt/tongji_vein_session1_list.txt'
-    phase2_train = 'data_txt/tongji_session1_phase2_train.txt'
-    phase2_val = 'data_txt/tongji_session1_phase2_val.txt'
+    list_file_palm = 'data_txt/tongji_palmprint_list.txt'
+    list_file_vein = 'data_txt/tongji_palmvein_list.txt'
+    phase2_train = 'data_txt/tongji_phase2_train.txt'
+    phase2_val = 'data_txt/tongji_phase2_val.txt'
 
     p1_epochs, p1_batch, p1_lr = 200, 16, 1e-3
     p1_patience = 100

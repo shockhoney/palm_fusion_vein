@@ -144,8 +144,8 @@ def main():
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/models/stage2_best.pth")
     parser.add_argument("--save_dir", type=str, default="outputs/models")
 
-    parser.add_argument("--epochs", type=int, default=180)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
 

@@ -139,14 +139,14 @@ def safe_torch_load(path, device):
 
 def main():
     parser = argparse.ArgumentParser("Distill student (TinyMobileFaceNet) from teacher (MobileFaceNet)")
-    parser.add_argument("--train_list", type=str, default="data_txt/CUMT_phase2_train.txt")
-    parser.add_argument("--val_list", type=str, default="data_txt/CUMT_phase2_val.txt")
+    parser.add_argument("--train_list", type=str, default="data_txt/CASIA_phase2_train.txt")
+    parser.add_argument("--val_list", type=str, default="data_txt/CASIA_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/models/stage2_best.pth")
     parser.add_argument("--save_dir", type=str, default="outputs/models")
 
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--epochs", type=int, default=150)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--wd", type=float, default=1e-4)
 
     parser.add_argument("--eval_every", type=int, default=5)

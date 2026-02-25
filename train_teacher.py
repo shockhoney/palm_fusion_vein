@@ -21,14 +21,14 @@ class Config:
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'data_txt/CUMT_palmprint_list.txt'
-    list_file_vein = 'data_txt/CUMT_palmvein_list.txt'
-    phase2_train = 'data_txt/CUMT_phase2_train.txt'
-    phase2_val = 'data_txt/CUMT_phase2_val.txt'
+    list_file_palm = 'data_txt/CASIA_palmprint_list.txt'
+    list_file_vein = 'data_txt/CASIA_palmvein_list.txt'
+    phase2_train = 'data_txt/CASIA_phase2_train.txt'
+    phase2_val = 'data_txt/CASIA_phase2_val.txt'
 
-    p1_epochs, p1_batch, p1_lr = 200, 8, 1e-3
+    p1_epochs, p1_batch, p1_lr = 150, 4, 1e-2
     p1_patience = 100
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 8, 1e-4, 1e-5
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 150, 4, 1e-3, 1e-4
     p2_patience = 100
 
 config = Config()

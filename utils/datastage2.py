@@ -101,12 +101,12 @@ def generate_phase2_lists(palm_file, vein_file, out_train, out_val, out_test=Non
 if __name__ == '__main__':
     os.chdir(PROJECT_ROOT)
     # 配置文件路径
-    PALM_LIST = 'data_txt/tongji_palmprint_list.txt'
-    VEIN_LIST = 'data_txt/tongji_palmvein_list.txt'
+    PALM_LIST = 'data_txt/CASIA_palmprint_list.txt'
+    VEIN_LIST = 'data_txt/CASIA_palmvein_list.txt'
 
     # 输出文件路径
-    OUTPUT_TRAIN = 'data_txt/tongji_phase2_train.txt'
-    OUTPUT_VAL   = 'data_txt/tongji_phase2_val.txt'
-    OUTPUT_TEST  = 'data_txt/tongji_phase2_test.txt' # 可选
+    OUTPUT_TRAIN = 'data_txt/CASIA_phase2_train.txt'
+    OUTPUT_VAL   = 'data_txt/CASIA_phase2_val.txt'
+    OUTPUT_TEST  = 'data_txt/CASIA_phase2_test.txt' # 可选
 
     generate_phase2_lists(PALM_LIST, VEIN_LIST, OUTPUT_TRAIN, OUTPUT_VAL, OUTPUT_TEST)

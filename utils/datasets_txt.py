@@ -179,12 +179,12 @@ if __name__ == '__main__':
     os.chdir(PROJECT_ROOT)
     gen_polyu_list("data/CASIA/ir",
         out_txt="data_txt/CASIA_palmvein_list.txt",
-        train_ratio=0.6,
-        val_ratio=0.2,
+        train_ratio=0.67,
+        val_ratio=0.33,
         seed=42)
     gen_polyu_list("data/CASIA/vi",
         out_txt="data_txt/CASIA_palmprint_list.txt",
-        train_ratio=0.6,
-        val_ratio=0.2,
+        train_ratio=0.67,
+        val_ratio=0.33,
         seed=42)
 

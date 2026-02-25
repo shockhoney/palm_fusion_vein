@@ -104,9 +104,9 @@ def main():
 
     cnn_palm, feat_dim, local_dim = build_backbone(cfg.backbone)
     cnn_vein, _, _ = build_backbone(cfg.backbone)
-    #fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(device)
+    fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(device)
     
-    fusion_model = Stage2FusionStudent_BottleneckGate( in_dim_global=feat_dim, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True).to(device)
+    #fusion_model = Stage2FusionStudent_BottleneckGate( in_dim_global=feat_dim, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True).to(device)
 
 
     # 只需加载第二阶段checkpoint，里面含有第一阶段的模型权重和融合模型权重

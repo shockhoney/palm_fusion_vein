@@ -17,11 +17,11 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "data_txt/CUMT_palmvein_list.txt"
-    red_list = "data_txt/CUMT_palmprint_list.txt"
-    phase2_pair_txt = "data_txt/CUMT_phase2_test.txt"
+    nir_list = "data_txt/CASIA_palmvein_list.txt"
+    red_list = "data_txt/CASIA_palmprint_list.txt"
+    phase2_pair_txt = "data_txt/CASIA_phase2_test.txt"
     backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
-    stage2_ckpt = os.path.join("outputs", "CUMT_models", "student_last_distill.pth")
+    stage2_ckpt = os.path.join("outputs", "CASIA_models", "student_last_distill.pth")
  
 
 @torch.no_grad()

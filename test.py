@@ -20,7 +20,7 @@ class Config:
     nir_list = "data_txt/CUMT_palmvein_list.txt"
     red_list = "data_txt/CUMT_palmprint_list.txt"
     phase2_pair_txt = "data_txt/CUMT_phase2_test.txt"
-    backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
+    backbone ='mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
     stage2_ckpt = os.path.join("outputs", "models", "student_last_distill.pth")
  
 

@@ -16,5 +16,9 @@ utils/__pycache__/
 !requirements.txt
 
 # 论文
-article.tex
+SPIE_journal_papers__sample_manuscript_showing_style_and_formatting_specifications/
 
+#pdfs
+*PDF
+#json files
+*json_files

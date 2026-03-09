@@ -1,3 +1,4 @@
+
 import os
 import argparse
 import numpy as np
@@ -99,34 +100,41 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
 
 
 # -------------------------
-# KD losses (concise)
+# CWD loss
 # -------------------------
-def cosine_kd_per_sample(z_s, z_t):
-    z_s = F.normalize(z_s, dim=1)
-    z_t = F.normalize(z_t, dim=1)
-    return 1.0 - (z_s * z_t).sum(dim=1)  # (B,)
-
-
-def sim_matrix(z):
-    z = F.normalize(z, dim=1)
-    return z @ z.T
-
-
-def weighted_relational_kd(z_s, z_t, w):
+class ChannelWiseDistillationLoss(nn.Module):
     """
-    Relational KD: align similarity matrices in a batch.
-    w: (B,) teacher-confidence weights in [0,1]
+    Channel-wise KD for dense prediction:
+    For each channel, perform spatial softmax over HxW and minimize KL(teacher || student).
     """
-    S_s = sim_matrix(z_s)
-    S_t = sim_matrix(z_t)
-    W = (w[:, None] * w[None, :]).detach()
-    return ((S_s - S_t) ** 2 * W).mean()
 
+    def __init__(self, temperature: float = 4.0, loss_weight: float = 1.0):
+        super().__init__()
+        self.temperature = float(temperature)
+        self.loss_weight = float(loss_weight)
 
-def ramp(epoch, ramp_epochs):
-    if ramp_epochs <= 0:
-        return 1.0
-    return min(1.0, epoch / float(ramp_epochs))
+    def forward(self, student_feat: torch.Tensor, teacher_feat: torch.Tensor) -> torch.Tensor:
+        if student_feat.dim() != 4 or teacher_feat.dim() != 4:
+            raise ValueError(
+                f"CWD expects 4D tensors [B,C,H,W], got {student_feat.shape} and {teacher_feat.shape}"
+            )
+        if student_feat.shape != teacher_feat.shape:
+            raise ValueError(
+                f"CWD requires same shape for student/teacher features, got "
+                f"{student_feat.shape} vs {teacher_feat.shape}"
+            )
+
+        b, c, h, w = student_feat.shape
+        t = self.temperature
+
+        s = student_feat.view(b, c, -1) / t
+        tea = teacher_feat.view(b, c, -1) / t
+
+        s_log_prob = F.log_softmax(s, dim=-1)
+        t_prob = F.softmax(tea, dim=-1)
+
+        loss = F.kl_div(s_log_prob, t_prob, reduction="none").sum(dim=-1).mean()
+        return self.loss_weight * (t ** 2) * loss
 
 
 def safe_torch_load(path, device):
@@ -138,11 +146,11 @@ def safe_torch_load(path, device):
 
 
 def main():
-    parser = argparse.ArgumentParser("Distill student (TinyMobileFaceNet) from teacher (MobileFaceNet)")
+    parser = argparse.ArgumentParser("Train student with CWD distillation from teacher")
     parser.add_argument("--train_list", type=str, default="data_txt/polyu_phase2_train.txt")
     parser.add_argument("--val_list", type=str, default="data_txt/polyu_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/polyu_models/stage2_best.pth")
-    parser.add_argument("--save_dir", type=str, default="outputs/models")
+    parser.add_argument("--save_dir", type=str, default="outputs_distill/CWD_models")
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -152,16 +160,15 @@ def main():
     parser.add_argument("--eval_every", type=int, default=5)
     parser.add_argument("--far_list", type=float, nargs="+", default=[1e-3, 1e-4, 1e-5])
 
-    # distill weights
-    parser.add_argument("--lambda_emb", type=float, default=2.0)
-    parser.add_argument("--lambda_rel", type=float, default=2.0)
+    # loss weights
     parser.add_argument("--lambda_cls", type=float, default=1.0)
-    parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--lambda_cwd", type=float, default=1.0)
+    parser.add_argument("--cwd_temperature", type=float, default=4.0)
 
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "runs_distill"))
+    writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "runs_cwd"))
 
     # -------------------------
     # num_classes from train_list
@@ -239,15 +246,22 @@ def main():
     ).to(device)
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
+    cwd_loss = ChannelWiseDistillationLoss(
+        temperature=args.cwd_temperature,
+        loss_weight=1.0
+    ).to(device)
+
     optimizer = torch.optim.AdamW(
-        list(cnn_palm_S.parameters()) + list(cnn_vein_S.parameters()) +
-        list(fusion_S.parameters()) + list(classifier_S.parameters()),
+        list(cnn_palm_S.parameters()) +
+        list(cnn_vein_S.parameters()) +
+        list(fusion_S.parameters()) +
+        list(classifier_S.parameters()),
         lr=args.lr, weight_decay=args.wd
     )
     ce = nn.CrossEntropyLoss()
 
     best_eer = 1e9
-    best_path = os.path.join(args.save_dir, "student_best_distill.pth")
+    best_path = os.path.join(args.save_dir, "student_best_cwd.pth")
 
     # -------------------------
     # Train
@@ -258,14 +272,9 @@ def main():
         fusion_S.train()
         classifier_S.train()
 
-        w = ramp(epoch, args.ramp_epochs)
-        lam_emb = args.lambda_emb * w
-        lam_rel = args.lambda_rel * w
-
         epoch_loss = 0.0
         epoch_cls = 0.0
-        epoch_emb = 0.0
-        epoch_rel = 0.0
+        epoch_cwd = 0.0
         correct = 0
         seen = 0
 
@@ -277,33 +286,35 @@ def main():
 
             # ---- teacher forward (no grad) ----
             with torch.no_grad():
-                fp_T = cnn_palm_T(palm, return_spatial=False)
-                fv_T = cnn_vein_T(vein, return_spatial=False)
-                z_T = fusion_T(fp_T, fv_T)  # (B,512)
-                logit_T = classifier_T(z_T, y)
-                conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
+                feat_palm_T = cnn_palm_T(palm, return_spatial=True)   # [B,256,H,W]
+                feat_vein_T = cnn_vein_T(vein, return_spatial=True)   # [B,256,H,W]
+                fp_T = cnn_palm_T(palm, return_spatial=False)         # [B,256]
+                fv_T = cnn_vein_T(vein, return_spatial=False)         # [B,256]
+                z_T = fusion_T(fp_T, fv_T)                            # [B,512]
+                _ = classifier_T(z_T, y)                              # keep teacher path complete/consistent
 
             # ---- student forward ----
-            fp_S = cnn_palm_S(palm, return_spatial=False)
-            fv_S = cnn_vein_S(vein, return_spatial=False)
+            feat_palm_S = cnn_palm_S(palm, return_spatial=True)       # [B,256,H,W]
+            feat_vein_S = cnn_vein_S(vein, return_spatial=True)       # [B,256,H,W]
+            fp_S = cnn_palm_S(palm, return_spatial=False)             # [B,256]
+            fv_S = cnn_vein_S(vein, return_spatial=False)             # [B,256]
             z_S = fusion_S(fp_S, fv_S)
-
             logit_S = classifier_S(z_S, y)
+
             loss_cls = ce(logit_S, y)
+            loss_cwd_palm = cwd_loss(feat_palm_S, feat_palm_T.detach())
+            loss_cwd_vein = cwd_loss(feat_vein_S, feat_vein_T.detach())
+            loss_cwd = 0.5 * (loss_cwd_palm + loss_cwd_vein)
 
-            # embedding KD (confidence-weighted)
-            emb_per = cosine_kd_per_sample(z_S, z_T)  # (B,)
-            loss_emb = (emb_per * conf).sum() / (conf.sum() + 1e-6)
-
-            # relational KD (confidence-weighted)
-            loss_rel = weighted_relational_kd(z_S, z_T, conf)
-
-            loss = args.lambda_cls * loss_cls + lam_emb * loss_emb + lam_rel * loss_rel
+            loss = args.lambda_cls * loss_cls + args.lambda_cwd * loss_cwd
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
-                list(cnn_palm_S.parameters()) + list(cnn_vein_S.parameters()) + list(fusion_S.parameters()),
+                list(cnn_palm_S.parameters()) +
+                list(cnn_vein_S.parameters()) +
+                list(fusion_S.parameters()) +
+                list(classifier_S.parameters()),
                 1.0
             )
             optimizer.step()
@@ -311,20 +322,22 @@ def main():
             bs = palm.size(0)
             epoch_loss += loss.item() * bs
             epoch_cls += loss_cls.item() * bs
-            epoch_emb += loss_emb.item() * bs
-            epoch_rel += loss_rel.item() * bs
+            epoch_cwd += loss_cwd.item() * bs
             correct += (logit_S.argmax(1) == y).sum().item()
             seen += bs
 
-            pbar.set_postfix(loss=f"{loss.item():.4f}", kd_w=f"{w:.2f}", emb=f"{lam_emb:.2f}", rel=f"{lam_rel:.2f}")
+            pbar.set_postfix(
+                loss=f"{loss.item():.4f}",
+                cls=f"{loss_cls.item():.4f}",
+                cwd=f"{loss_cwd.item():.4f}"
+            )
 
         avg_loss = epoch_loss / max(seen, 1)
         train_acc = correct / max(seen, 1)
-        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | kd_w={w:.2f}")
+        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}%")
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/loss_cls", epoch_cls / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_emb", epoch_emb / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_rel", epoch_rel / max(seen, 1), epoch)
+        writer.add_scalar("train/loss_cwd", epoch_cwd / max(seen, 1), epoch)
         writer.add_scalar("train/acc", train_acc, epoch)
 
         # ---- eval every N epochs ----
@@ -358,7 +371,7 @@ def main():
                     }, best_path)
                     print(f"[SAVE] best_eer={best_eer*100:.2f}% -> {best_path}")
 
-    last_path = os.path.join(args.save_dir, "student_last_distill.pth")
+    last_path = os.path.join(args.save_dir, "student_last_cwd.pth")
     torch.save({
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),

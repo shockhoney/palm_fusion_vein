@@ -142,7 +142,7 @@ def main():
     parser.add_argument("--train_list", type=str, default="data_txt/polyu_phase2_train.txt")
     parser.add_argument("--val_list", type=str, default="data_txt/polyu_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/polyu_models/stage2_best.pth")
-    parser.add_argument("--save_dir", type=str, default="outputs/models")
+    parser.add_argument("--save_dir", type=str, default="outputs_distill/DKD_models")
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=8)

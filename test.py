@@ -17,11 +17,11 @@ class Config:
     input_size = 224
     batch_size = 32
     num_workers = 4
-    nir_list = "data_txt/polyu_palmvein_list.txt"
-    red_list = "data_txt/polyu_palmprint_list.txt"
-    phase2_pair_txt = "data_txt/polyu_phase2_test.txt"
-    backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
-    stage2_ckpt = os.path.join("outputs", "polyu_models", "stage2_best.pth")
+    nir_list = "data_txt/PolyU_palmvein_list.txt"
+    red_list = "data_txt/PolyU_palmprint_list.txt"
+    phase2_pair_txt = "data_txt/PolyU_phase2_test.txt"
+    backbone ='mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
+    stage2_ckpt = os.path.join("outputs", "PolyU_models", "stage2_best.pth")
  
 
 @torch.no_grad()

@@ -1,4 +1,12 @@
 import os
+import sys
+
+# Add the project root directory to sys.path so 'utils' and 'models' can be imported
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "../../"))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import argparse
 import numpy as np
 

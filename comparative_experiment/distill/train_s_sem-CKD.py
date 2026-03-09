@@ -22,8 +22,7 @@ from utils.datasets_txt import PairTxtDataset
 from utils.metrics import compute_eer, tar_at_far
 from utils.head import Arcface_Head
 
-from models.stage1_mobileFacenet import MobileFaceNet
-from models.student_mobilefacenet import TinyMobileFaceNet
+from sem_CKD_student_mobilefacenet import MobileFaceNet, TinyMobileFaceNet
 from models.stage2 import Stage2Fusion
 from models.student_fusion import Stage2FusionStudent_BottleneckGate
 
@@ -107,34 +106,145 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
 
 
 # -------------------------
-# KD losses (concise)
+# SemCKD Modules (AAAI 2021)
 # -------------------------
-def cosine_kd_per_sample(z_s, z_t):
-    z_s = F.normalize(z_s, dim=1)
-    z_t = F.normalize(z_t, dim=1)
-    return 1.0 - (z_s * z_t).sum(dim=1)  # (B,)
+class Normalize(nn.Module):
+    """normalization layer"""
+    def __init__(self, power=2):
+        super(Normalize, self).__init__()
+        self.power = power
+
+    def forward(self, x):
+        norm = x.pow(self.power).sum(1, keepdim=True).pow(1. / self.power)
+        out = x.div(norm)
+        return out
 
 
-def sim_matrix(z):
-    z = F.normalize(z, dim=1)
-    return z @ z.T
+class MLPEmbed(nn.Module):
+    """non-linear embed by MLP"""
+    def __init__(self, dim_in=1024, dim_out=128):
+        super(MLPEmbed, self).__init__()
+        self.linear1 = nn.Linear(dim_in, 2 * dim_out)
+        self.relu = nn.ReLU(inplace=True)
+        self.linear2 = nn.Linear(2 * dim_out, dim_out)
+        self.l2norm = Normalize(2)
+
+    def forward(self, x):
+        x = x.view(x.shape[0], -1)
+        x = self.relu(self.linear1(x))
+        x = self.l2norm(self.linear2(x))
+        return x
 
 
-def weighted_relational_kd(z_s, z_t, w):
-    """
-    Relational KD: align similarity matrices in a batch.
-    w: (B,) teacher-confidence weights in [0,1]
-    """
-    S_s = sim_matrix(z_s)
-    S_t = sim_matrix(z_t)
-    W = (w[:, None] * w[None, :]).detach()
-    return ((S_s - S_t) ** 2 * W).mean()
+class AAEmbed(nn.Module):
+    """non-linear embed by MLP"""
+    def __init__(self, num_input_channels=1024, num_target_channels=128):
+        super(AAEmbed, self).__init__()
+        self.num_mid_channel = 2 * num_target_channels
+        
+        def conv1x1(in_channels, out_channels, stride=1):
+            return nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=stride, bias=False)
+        def conv3x3(in_channels, out_channels, stride=1):
+            return nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=stride, bias=False)
+        
+        self.regressor = nn.Sequential(
+            conv1x1(num_input_channels, self.num_mid_channel),
+            nn.BatchNorm2d(self.num_mid_channel),
+            nn.ReLU(inplace=True),
+            conv3x3(self.num_mid_channel, self.num_mid_channel),
+            nn.BatchNorm2d(self.num_mid_channel),
+            nn.ReLU(inplace=True),
+            conv1x1(self.num_mid_channel, num_target_channels),
+        )
+
+    def forward(self, x):
+        x = self.regressor(x)
+        return x
 
 
-def ramp(epoch, ramp_epochs):
-    if ramp_epochs <= 0:
-        return 1.0
-    return min(1.0, epoch / float(ramp_epochs))
+class SelfA(nn.Module):
+    """Cross layer Self Attention"""
+    def __init__(self, s_len, t_len, input_channel, s_n, s_t, factor=4): 
+        super(SelfA, self).__init__()
+        
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
+        for i in range(t_len):
+            setattr(self, 'key_weight'+str(i), MLPEmbed(input_channel, input_channel//factor))
+        for i in range(s_len):
+            setattr(self, 'query_weight'+str(i), MLPEmbed(input_channel, input_channel//factor))
+        
+        for i in range(s_len):
+            for j in range(t_len):
+                setattr(self, 'regressor'+str(i)+str(j), AAEmbed(s_n[i], s_t[j]))
+               
+    def forward(self, feat_s, feat_t):
+        
+        sim_t = list(range(len(feat_t)))
+        sim_s = list(range(len(feat_s)))
+        bsz = feat_s[0].shape[0]
+        # similarity matrix
+        for i in range(len(feat_t)):
+            sim_temp = feat_t[i].reshape(bsz, -1)
+            sim_t[i] = torch.matmul(sim_temp, sim_temp.t())
+        for i in range(len(feat_s)):
+            sim_temp = feat_s[i].reshape(bsz, -1)
+            sim_s[i] = torch.matmul(sim_temp, sim_temp.t())
+        
+        # key of target layers    
+        proj_key = getattr(self, 'key_weight0')(sim_t[0])
+        proj_key = proj_key[:, :, None]
+        
+        for i in range(1, len(sim_t)):
+            temp_proj_key = getattr(self, 'key_weight'+str(i))(sim_t[i])
+            proj_key =  torch.cat([proj_key, temp_proj_key[:, :, None]], 2)
+        
+        # query of source layers   
+        proj_query = getattr(self, 'query_weight0')(sim_s[0])
+        proj_query = proj_query[:, None, :]
+        for i in range(1, len(sim_s)):
+            temp_proj_query = getattr(self, 'query_weight'+str(i))(sim_s[i])
+            proj_query = torch.cat([proj_query, temp_proj_query[:, None, :]], 1)
+        
+        # attention weight
+        energy = torch.bmm(proj_query, proj_key) # batch_size X No.stu feature X No.tea feature
+        attention = F.softmax(energy, dim = -1)
+        
+        # feature space alignment
+        proj_value_stu = []
+        value_tea = []
+        for i in range(len(sim_s)):
+            proj_value_stu.append([])
+            value_tea.append([])
+            for j in range(len(sim_t)):            
+                s_H, t_H = feat_s[i].shape[2], feat_t[j].shape[2]
+                if s_H > t_H:
+                    input = F.adaptive_avg_pool2d(feat_s[i], (t_H, t_H))
+                    proj_value_stu[i].append(getattr(self, 'regressor'+str(i)+str(j))(input))
+                    value_tea[i].append(feat_t[j])
+                elif s_H < t_H or s_H == t_H:
+                    target = F.adaptive_avg_pool2d(feat_t[j], (s_H, s_H))
+                    proj_value_stu[i].append(getattr(self, 'regressor'+str(i)+str(j))(feat_s[i]))
+                    value_tea[i].append(target)
+                
+        return proj_value_stu, value_tea, attention
+
+
+class SemCKDLoss(nn.Module):
+    """Cross-Layer Distillation with Semantic Calibration, AAAI2021"""
+    def __init__(self):
+        super(SemCKDLoss, self).__init__()
+        self.crit = nn.MSELoss(reduction='none')
+        
+    def forward(self, s_value, f_target, weight):
+        bsz, num_stu, num_tea = weight.shape
+        ind_loss = torch.zeros(bsz, num_stu, num_tea, device=weight.device)
+
+        for i in range(num_stu):
+            for j in range(num_tea):
+                ind_loss[:, i, j] = self.crit(s_value[i][j], f_target[i][j]).reshape(bsz,-1).mean(-1)
+
+        loss = (weight * ind_loss).sum()/(1.0*bsz*num_stu)
+        return loss
 
 
 def safe_torch_load(path, device):
@@ -152,7 +262,7 @@ def main():
     parser.add_argument("--teacher_ckpt", type=str, default=os.path.join(project_root, "outputs/polyu_models/stage2_best.pth"))
     parser.add_argument("--save_dir", type=str, default=os.path.join(project_root, "outputs_distill/sem-CKD_models"))
 
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=130)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
@@ -161,10 +271,8 @@ def main():
     parser.add_argument("--far_list", type=float, nargs="+", default=[1e-3, 1e-4, 1e-5])
 
     # distill weights
-    parser.add_argument("--lambda_emb", type=float, default=2.0)
-    parser.add_argument("--lambda_rel", type=float, default=2.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
-    parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--lambda_semckd", type=float, default=10.0)
 
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
@@ -247,15 +355,27 @@ def main():
     ).to(device)
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
-    optimizer = torch.optim.AdamW(
+    # Note: the architecture channels below are manually matched
+    # Teacher (MobileFaceNet): conv3(32)-conv4(64)-conv5(64)-conv6(256)
+    # Student (TinyMobileFaceNet): conv3(16)-conv4(32)-conv5(32)-conv6(256)
+    t_n = [32, 64, 64, 256]
+    s_n = [16, 32, 32, 256]
+    
+    criterion_kd = SemCKDLoss().to(device)
+    selfa_palm = SelfA(len(s_n), len(t_n), args.batch_size, s_n, t_n).to(device)
+    selfa_vein = SelfA(len(s_n), len(t_n), args.batch_size, s_n, t_n).to(device)
+
+    optimizer_params = (
         list(cnn_palm_S.parameters()) + list(cnn_vein_S.parameters()) +
-        list(fusion_S.parameters()) + list(classifier_S.parameters()),
-        lr=args.lr, weight_decay=args.wd
+        list(fusion_S.parameters()) + list(classifier_S.parameters()) +
+        list(selfa_palm.parameters()) + list(selfa_vein.parameters())
     )
+
+    optimizer = torch.optim.AdamW(optimizer_params, lr=args.lr, weight_decay=args.wd)
     ce = nn.CrossEntropyLoss()
 
     best_eer = 1e9
-    best_path = os.path.join(args.save_dir, "student_best_distill.pth")
+    best_path = os.path.join(args.save_dir, "student_best_semckd.pth")
 
     # -------------------------
     # Train
@@ -266,14 +386,12 @@ def main():
         fusion_S.train()
         classifier_S.train()
 
-        w = ramp(epoch, args.ramp_epochs)
-        lam_emb = args.lambda_emb * w
-        lam_rel = args.lambda_rel * w
+        selfa_palm.train()
+        selfa_vein.train()
 
         epoch_loss = 0.0
         epoch_cls = 0.0
-        epoch_emb = 0.0
-        epoch_rel = 0.0
+        epoch_semckd = 0.0
         correct = 0
         seen = 0
 
@@ -285,54 +403,52 @@ def main():
 
             # ---- teacher forward (no grad) ----
             with torch.no_grad():
-                fp_T = cnn_palm_T(palm, return_spatial=False)
-                fv_T = cnn_vein_T(vein, return_spatial=False)
-                z_T = fusion_T(fp_T, fv_T)  # (B,512)
-                logit_T = classifier_T(z_T, y)
-                conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
+                feat_t_palm = cnn_palm_T(palm, return_all_spatial=True)
+                feat_t_vein = cnn_vein_T(vein, return_all_spatial=True)
+                # extract global embedding correctly to compute conf if need be (SemCKD generally doesn't)
 
             # ---- student forward ----
-            fp_S = cnn_palm_S(palm, return_spatial=False)
-            fv_S = cnn_vein_S(vein, return_spatial=False)
-            z_S = fusion_S(fp_S, fv_S)
+            feat_s_palm = cnn_palm_S(palm, return_all_spatial=True)
+            feat_s_vein = cnn_vein_S(vein, return_all_spatial=True)
 
+            fp_S = cnn_palm_S.bn(cnn_palm_S.global_pool(feat_s_palm[-1]).flatten(1))
+            fv_S = cnn_vein_S.bn(cnn_vein_S.global_pool(feat_s_vein[-1]).flatten(1))
+            
+            z_S = fusion_S(fp_S, fv_S)
             logit_S = classifier_S(z_S, y)
             loss_cls = ce(logit_S, y)
 
-            # embedding KD (confidence-weighted)
-            emb_per = cosine_kd_per_sample(z_S, z_T)  # (B,)
-            loss_emb = (emb_per * conf).sum() / (conf.sum() + 1e-6)
+            # SemCKD KD calculation
+            proj_val_stu_p, val_tea_p, attn_p = selfa_palm(feat_s_palm, feat_t_palm)
+            loss_semckd_palm = criterion_kd(proj_val_stu_p, val_tea_p, attn_p)
 
-            # relational KD (confidence-weighted)
-            loss_rel = weighted_relational_kd(z_S, z_T, conf)
+            proj_val_stu_v, val_tea_v, attn_v = selfa_vein(feat_s_vein, feat_t_vein)
+            loss_semckd_vein = criterion_kd(proj_val_stu_v, val_tea_v, attn_v)
 
-            loss = args.lambda_cls * loss_cls + lam_emb * loss_emb + lam_rel * loss_rel
+            loss_semckd = 0.5 * (loss_semckd_palm + loss_semckd_vein)
+
+            loss = args.lambda_cls * loss_cls + args.lambda_semckd * loss_semckd
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(cnn_palm_S.parameters()) + list(cnn_vein_S.parameters()) + list(fusion_S.parameters()),
-                1.0
-            )
+            torch.nn.utils.clip_grad_norm_(optimizer_params, 1.0)
             optimizer.step()
 
             bs = palm.size(0)
             epoch_loss += loss.item() * bs
             epoch_cls += loss_cls.item() * bs
-            epoch_emb += loss_emb.item() * bs
-            epoch_rel += loss_rel.item() * bs
+            epoch_semckd += loss_semckd.item() * bs
             correct += (logit_S.argmax(1) == y).sum().item()
             seen += bs
 
-            pbar.set_postfix(loss=f"{loss.item():.4f}", kd_w=f"{w:.2f}", emb=f"{lam_emb:.2f}", rel=f"{lam_rel:.2f}")
+            pbar.set_postfix(loss=f"{loss.item():.4f}", kd_s=f"{loss_semckd.item():.4f}")
 
         avg_loss = epoch_loss / max(seen, 1)
         train_acc = correct / max(seen, 1)
-        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | kd_w={w:.2f}")
+        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | SemCKD l={epoch_semckd/max(seen, 1):.4f}")
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/loss_cls", epoch_cls / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_emb", epoch_emb / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_rel", epoch_rel / max(seen, 1), epoch)
+        writer.add_scalar("train/loss_semckd", epoch_semckd / max(seen, 1), epoch)
         writer.add_scalar("train/acc", train_acc, epoch)
 
         # ---- eval every N epochs ----
@@ -366,7 +482,7 @@ def main():
                     }, best_path)
                     print(f"[SAVE] best_eer={best_eer*100:.2f}% -> {best_path}")
 
-    last_path = os.path.join(args.save_dir, "student_last_distill.pth")
+    last_path = os.path.join(args.save_dir, "student_last_semckd.pth")
     torch.save({
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),

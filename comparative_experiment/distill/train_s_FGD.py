@@ -107,35 +107,129 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
 
 
 # -------------------------
-# KD losses (concise)
+# FGD Loss (CVPR 2022) adapted for classification
+# Official repo: yzd-v/FGD
 # -------------------------
-def cosine_kd_per_sample(z_s, z_t):
-    z_s = F.normalize(z_s, dim=1)
-    z_t = F.normalize(z_t, dim=1)
-    return 1.0 - (z_s * z_t).sum(dim=1)  # (B,)
+class FeatureLoss(nn.Module):
+    def __init__(self,
+                 student_channels,
+                 teacher_channels,
+                 temp=0.5,
+                 alpha_fgd=0.001,
+                 gamma_fgd=0.001,
+                 lambda_fgd=0.000005):
+        super(FeatureLoss, self).__init__()
+        self.temp = temp
+        self.alpha_fgd = alpha_fgd
+        self.gamma_fgd = gamma_fgd
+        self.lambda_fgd = lambda_fgd
 
+        if student_channels != teacher_channels:
+            self.align = nn.Conv2d(student_channels, teacher_channels, kernel_size=1, stride=1, padding=0)
+        else:
+            self.align = None
+        
+        self.conv_mask_s = nn.Conv2d(teacher_channels, 1, kernel_size=1)
+        self.conv_mask_t = nn.Conv2d(teacher_channels, 1, kernel_size=1)
+        self.channel_add_conv_s = nn.Sequential(
+            nn.Conv2d(teacher_channels, teacher_channels//2, kernel_size=1),
+            nn.LayerNorm([teacher_channels//2, 1, 1]),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(teacher_channels//2, teacher_channels, kernel_size=1))
+        self.channel_add_conv_t = nn.Sequential(
+            nn.Conv2d(teacher_channels, teacher_channels//2, kernel_size=1),
+            nn.LayerNorm([teacher_channels//2, 1, 1]),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(teacher_channels//2, teacher_channels, kernel_size=1))
 
-def sim_matrix(z):
-    z = F.normalize(z, dim=1)
-    return z @ z.T
+        self.reset_parameters()
 
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.conv_mask_s.weight, mode='fan_in')
+        nn.init.kaiming_uniform_(self.conv_mask_t.weight, mode='fan_in')
+        nn.init.constant_(self.channel_add_conv_s[-1].weight, 0)
+        nn.init.constant_(self.channel_add_conv_t[-1].weight, 0)
 
-def weighted_relational_kd(z_s, z_t, w):
-    """
-    Relational KD: align similarity matrices in a batch.
-    w: (B,) teacher-confidence weights in [0,1]
-    """
-    S_s = sim_matrix(z_s)
-    S_t = sim_matrix(z_t)
-    W = (w[:, None] * w[None, :]).detach()
-    return ((S_s - S_t) ** 2 * W).mean()
+    def forward(self, preds_S, preds_T):
+        """
+        preds_S: BxCxHxW
+        preds_T: BxCxHxW
+        """
+        assert preds_S.shape[-2:] == preds_T.shape[-2:], 'Spatial mismatch'
 
+        if self.align is not None:
+            preds_S = self.align(preds_S)
 
-def ramp(epoch, ramp_epochs):
-    if ramp_epochs <= 0:
-        return 1.0
-    return min(1.0, epoch / float(ramp_epochs))
+        S_attention_t, C_attention_t = self.get_attention(preds_T, self.temp)
+        S_attention_s, C_attention_s = self.get_attention(preds_S, self.temp)
 
+        # Without bounding boxes, we treat the whole image as foreground for attention mimicking.
+        Mask_fg = torch.ones_like(S_attention_t)
+
+        fg_loss = self.get_fea_loss(preds_S, preds_T, Mask_fg, C_attention_s, C_attention_t, S_attention_s, S_attention_t)
+        mask_loss = self.get_mask_loss(C_attention_s, C_attention_t, S_attention_s, S_attention_t)
+        rela_loss = self.get_rela_loss(preds_S, preds_T)
+
+        loss = self.alpha_fgd * fg_loss + self.gamma_fgd * mask_loss + self.lambda_fgd * rela_loss
+        return loss
+
+    def get_attention(self, preds, temp):
+        N, C, H, W = preds.shape
+        value = torch.abs(preds)
+        # Spatial Attention: Bs*W*H
+        fea_map = value.mean(axis=1, keepdim=True)
+        S_attention = (H * W * F.softmax((fea_map/temp).view(N,-1), dim=1)).view(N, H, W)
+        # Channel Attention: Bs*C
+        channel_map = value.mean(axis=2,keepdim=False).mean(axis=2,keepdim=False)
+        C_attention = C * F.softmax(channel_map/temp, dim=1)
+        return S_attention, C_attention
+
+    def get_fea_loss(self, preds_S, preds_T, Mask_fg, C_s, C_t, S_s, S_t):
+        loss_mse = nn.MSELoss(reduction='sum')
+        Mask_fg = Mask_fg.unsqueeze(dim=1)
+        C_t = C_t.unsqueeze(dim=-1).unsqueeze(dim=-1)
+        S_t = S_t.unsqueeze(dim=1)
+
+        fea_t = torch.mul(preds_T, torch.sqrt(S_t))
+        fea_t = torch.mul(fea_t, torch.sqrt(C_t))
+        fg_fea_t = torch.mul(fea_t, torch.sqrt(Mask_fg))
+
+        fea_s = torch.mul(preds_S, torch.sqrt(S_t))
+        fea_s = torch.mul(fea_s, torch.sqrt(C_t))
+        fg_fea_s = torch.mul(fea_s, torch.sqrt(Mask_fg))
+
+        fg_loss = loss_mse(fg_fea_s, fg_fea_t) / len(Mask_fg)
+        return fg_loss
+
+    def get_mask_loss(self, C_s, C_t, S_s, S_t):
+        mask_loss = torch.sum(torch.abs((C_s-C_t)))/len(C_s) + torch.sum(torch.abs((S_s-S_t)))/len(S_s)
+        return mask_loss
+
+    def spatial_pool(self, x, in_type):
+        batch, channel, width, height = x.size()
+        input_x = x.view(batch, channel, height * width).unsqueeze(1)
+        if in_type == 0:
+            context_mask = self.conv_mask_s(x)
+        else:
+            context_mask = self.conv_mask_t(x)
+        context_mask = context_mask.view(batch, 1, height * width)
+        context_mask = F.softmax(context_mask, dim=2).unsqueeze(-1)
+        context = torch.matmul(input_x, context_mask).view(batch, channel, 1, 1)
+        return context
+
+    def get_rela_loss(self, preds_S, preds_T):
+        loss_mse = nn.MSELoss(reduction='sum')
+        context_s = self.spatial_pool(preds_S, 0)
+        context_t = self.spatial_pool(preds_T, 1)
+        
+        channel_add_s = self.channel_add_conv_s(context_s)
+        out_s = preds_S + channel_add_s
+        
+        channel_add_t = self.channel_add_conv_t(context_t)
+        out_t = preds_T + channel_add_t
+        
+        rela_loss = loss_mse(out_s, out_t) / len(out_s)
+        return rela_loss
 
 def safe_torch_load(path, device):
     # Avoid torch.load warning in newer PyTorch if possible
@@ -152,7 +246,7 @@ def main():
     parser.add_argument("--teacher_ckpt", type=str, default=os.path.join(project_root, "outputs/polyu_models/stage2_best.pth"))
     parser.add_argument("--save_dir", type=str, default=os.path.join(project_root, "outputs_distill/FGD_models"))
 
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
@@ -161,10 +255,11 @@ def main():
     parser.add_argument("--far_list", type=float, nargs="+", default=[1e-3, 1e-4, 1e-5])
 
     # distill weights
-    parser.add_argument("--lambda_emb", type=float, default=2.0)
-    parser.add_argument("--lambda_rel", type=float, default=2.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
-    parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--temp", type=float, default=0.5)
+    parser.add_argument("--alpha_fgd", type=float, default=0.001)
+    parser.add_argument("--gamma_fgd", type=float, default=0.001)
+    parser.add_argument("--lambda_fgd", type=float, default=0.000005)
 
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
@@ -247,15 +342,24 @@ def main():
     ).to(device)
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
-    optimizer = torch.optim.AdamW(
+    # Instantiate FGD Loss modules for each branch (palm and vein)
+    fgd_loss_palm = FeatureLoss(student_channels=feat_dim_S, teacher_channels=feat_dim_T, 
+                                temp=args.temp, alpha_fgd=args.alpha_fgd, 
+                                gamma_fgd=args.gamma_fgd, lambda_fgd=args.lambda_fgd).to(device)
+    fgd_loss_vein = FeatureLoss(student_channels=feat_dim_S, teacher_channels=feat_dim_T, 
+                                temp=args.temp, alpha_fgd=args.alpha_fgd, 
+                                gamma_fgd=args.gamma_fgd, lambda_fgd=args.lambda_fgd).to(device)
+
+    optimizer_params = (
         list(cnn_palm_S.parameters()) + list(cnn_vein_S.parameters()) +
-        list(fusion_S.parameters()) + list(classifier_S.parameters()),
-        lr=args.lr, weight_decay=args.wd
+        list(fusion_S.parameters()) + list(classifier_S.parameters()) +
+        list(fgd_loss_palm.parameters()) + list(fgd_loss_vein.parameters())
     )
+    optimizer = torch.optim.AdamW(optimizer_params, lr=args.lr, weight_decay=args.wd)
     ce = nn.CrossEntropyLoss()
 
     best_eer = 1e9
-    best_path = os.path.join(args.save_dir, "student_best_distill.pth")
+    best_path = os.path.join(args.save_dir, "student_best_fgd.pth")
 
     # -------------------------
     # Train
@@ -266,14 +370,12 @@ def main():
         fusion_S.train()
         classifier_S.train()
 
-        w = ramp(epoch, args.ramp_epochs)
-        lam_emb = args.lambda_emb * w
-        lam_rel = args.lambda_rel * w
+        fgd_loss_palm.train()
+        fgd_loss_vein.train()
 
         epoch_loss = 0.0
         epoch_cls = 0.0
-        epoch_emb = 0.0
-        epoch_rel = 0.0
+        epoch_fgd = 0.0
         correct = 0
         seen = 0
 
@@ -285,54 +387,48 @@ def main():
 
             # ---- teacher forward (no grad) ----
             with torch.no_grad():
-                fp_T = cnn_palm_T(palm, return_spatial=False)
-                fv_T = cnn_vein_T(vein, return_spatial=False)
-                z_T = fusion_T(fp_T, fv_T)  # (B,512)
-                logit_T = classifier_T(z_T, y)
-                conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
+                feat_palm_T = cnn_palm_T(palm, return_spatial=True)
+                feat_vein_T = cnn_vein_T(vein, return_spatial=True)
 
             # ---- student forward ----
-            fp_S = cnn_palm_S(palm, return_spatial=False)
-            fv_S = cnn_vein_S(vein, return_spatial=False)
+            feat_palm_S = cnn_palm_S(palm, return_spatial=True)
+            feat_vein_S = cnn_vein_S(vein, return_spatial=True)
+
+            fp_S = cnn_palm_S.bn(cnn_palm_S.global_pool(feat_palm_S).flatten(1))
+            fv_S = cnn_vein_S.bn(cnn_vein_S.global_pool(feat_vein_S).flatten(1))
+
             z_S = fusion_S(fp_S, fv_S)
 
             logit_S = classifier_S(z_S, y)
             loss_cls = ce(logit_S, y)
 
-            # embedding KD (confidence-weighted)
-            emb_per = cosine_kd_per_sample(z_S, z_T)  # (B,)
-            loss_emb = (emb_per * conf).sum() / (conf.sum() + 1e-6)
+            # FGD loss on spatial features
+            loss_fgd_p = fgd_loss_palm(feat_palm_S, feat_palm_T)
+            loss_fgd_v = fgd_loss_vein(feat_vein_S, feat_vein_T)
+            loss_fgd = 0.5 * (loss_fgd_p + loss_fgd_v)
 
-            # relational KD (confidence-weighted)
-            loss_rel = weighted_relational_kd(z_S, z_T, conf)
-
-            loss = args.lambda_cls * loss_cls + lam_emb * loss_emb + lam_rel * loss_rel
+            loss = args.lambda_cls * loss_cls + loss_fgd
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(cnn_palm_S.parameters()) + list(cnn_vein_S.parameters()) + list(fusion_S.parameters()),
-                1.0
-            )
+            torch.nn.utils.clip_grad_norm_(optimizer_params, 1.0)
             optimizer.step()
 
             bs = palm.size(0)
             epoch_loss += loss.item() * bs
             epoch_cls += loss_cls.item() * bs
-            epoch_emb += loss_emb.item() * bs
-            epoch_rel += loss_rel.item() * bs
+            epoch_fgd += loss_fgd.item() * bs
             correct += (logit_S.argmax(1) == y).sum().item()
             seen += bs
 
-            pbar.set_postfix(loss=f"{loss.item():.4f}", kd_w=f"{w:.2f}", emb=f"{lam_emb:.2f}", rel=f"{lam_rel:.2f}")
+            pbar.set_postfix(loss=f"{loss.item():.4f}", fgd=f"{loss_fgd.item():.4f}")
 
         avg_loss = epoch_loss / max(seen, 1)
         train_acc = correct / max(seen, 1)
-        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | kd_w={w:.2f}")
+        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}%")
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/loss_cls", epoch_cls / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_emb", epoch_emb / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_rel", epoch_rel / max(seen, 1), epoch)
+        writer.add_scalar("train/loss_fgd", epoch_fgd / max(seen, 1), epoch)
         writer.add_scalar("train/acc", train_acc, epoch)
 
         # ---- eval every N epochs ----
@@ -366,7 +462,7 @@ def main():
                     }, best_path)
                     print(f"[SAVE] best_eer={best_eer*100:.2f}% -> {best_path}")
 
-    last_path = os.path.join(args.save_dir, "student_last_distill.pth")
+    last_path = os.path.join(args.save_dir, "student_last_fgd.pth")
     torch.save({
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),

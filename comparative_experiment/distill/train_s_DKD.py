@@ -107,34 +107,49 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
 
 
 # -------------------------
-# KD losses (concise)
+# DKD Loss (CVPR 2022)
 # -------------------------
-def cosine_kd_per_sample(z_s, z_t):
-    z_s = F.normalize(z_s, dim=1)
-    z_t = F.normalize(z_t, dim=1)
-    return 1.0 - (z_s * z_t).sum(dim=1)  # (B,)
+def _get_gt_mask(logits, target):
+    target = target.reshape(-1)
+    mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), 1).bool()
+    return mask
 
+def _get_other_mask(logits, target):
+    target = target.reshape(-1)
+    mask = torch.ones_like(logits).scatter_(1, target.unsqueeze(1), 0).bool()
+    return mask
 
-def sim_matrix(z):
-    z = F.normalize(z, dim=1)
-    return z @ z.T
+def cat_mask(t, mask1, mask2):
+    t1 = (t * mask1).sum(dim=1, keepdims=True)
+    t2 = (t * mask2).sum(1, keepdims=True)
+    rt = torch.cat([t1, t2], dim=1)
+    return rt
 
-
-def weighted_relational_kd(z_s, z_t, w):
-    """
-    Relational KD: align similarity matrices in a batch.
-    w: (B,) teacher-confidence weights in [0,1]
-    """
-    S_s = sim_matrix(z_s)
-    S_t = sim_matrix(z_t)
-    W = (w[:, None] * w[None, :]).detach()
-    return ((S_s - S_t) ** 2 * W).mean()
-
-
-def ramp(epoch, ramp_epochs):
-    if ramp_epochs <= 0:
-        return 1.0
-    return min(1.0, epoch / float(ramp_epochs))
+def dkd_loss(logits_student, logits_teacher, target, alpha, beta, temperature):
+    gt_mask = _get_gt_mask(logits_student, target)
+    other_mask = _get_other_mask(logits_student, target)
+    pred_student = F.softmax(logits_student / temperature, dim=1)
+    pred_teacher = F.softmax(logits_teacher / temperature, dim=1)
+    pred_student = cat_mask(pred_student, gt_mask, other_mask)
+    pred_teacher = cat_mask(pred_teacher, gt_mask, other_mask)
+    log_pred_student = torch.log(pred_student + 1e-7)
+    tckd_loss = (
+        F.kl_div(log_pred_student, pred_teacher, reduction='sum')
+        * (temperature**2)
+        / target.shape[0]
+    )
+    pred_teacher_part2 = F.softmax(
+        logits_teacher / temperature - 1000.0 * gt_mask, dim=1
+    )
+    log_pred_student_part2 = F.log_softmax(
+        logits_student / temperature - 1000.0 * gt_mask, dim=1
+    )
+    nckd_loss = (
+        F.kl_div(log_pred_student_part2, pred_teacher_part2, reduction='sum')
+        * (temperature**2)
+        / target.shape[0]
+    )
+    return alpha * tckd_loss + beta * nckd_loss
 
 
 def safe_torch_load(path, device):
@@ -152,7 +167,7 @@ def main():
     parser.add_argument("--teacher_ckpt", type=str, default=os.path.join(project_root, "outputs/polyu_models/stage2_best.pth"))
     parser.add_argument("--save_dir", type=str, default=os.path.join(project_root, "outputs_distill/DKD_models"))
 
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=130)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
@@ -161,10 +176,11 @@ def main():
     parser.add_argument("--far_list", type=float, nargs="+", default=[1e-3, 1e-4, 1e-5])
 
     # distill weights
-    parser.add_argument("--lambda_emb", type=float, default=2.0)
-    parser.add_argument("--lambda_rel", type=float, default=2.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
-    parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--beta", type=float, default=8.0)
+    parser.add_argument("--temperature", type=float, default=4.0)
+    parser.add_argument("--warmup", type=int, default=20)
 
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
@@ -255,7 +271,7 @@ def main():
     ce = nn.CrossEntropyLoss()
 
     best_eer = 1e9
-    best_path = os.path.join(args.save_dir, "student_best_distill.pth")
+    best_path = os.path.join(args.save_dir, "student_best_dkd.pth")
 
     # -------------------------
     # Train
@@ -266,14 +282,11 @@ def main():
         fusion_S.train()
         classifier_S.train()
 
-        w = ramp(epoch, args.ramp_epochs)
-        lam_emb = args.lambda_emb * w
-        lam_rel = args.lambda_rel * w
+        warmup_factor = min(epoch / max(args.warmup, 1), 1.0)
 
         epoch_loss = 0.0
         epoch_cls = 0.0
-        epoch_emb = 0.0
-        epoch_rel = 0.0
+        epoch_dkd = 0.0
         correct = 0
         seen = 0
 
@@ -289,7 +302,6 @@ def main():
                 fv_T = cnn_vein_T(vein, return_spatial=False)
                 z_T = fusion_T(fp_T, fv_T)  # (B,512)
                 logit_T = classifier_T(z_T, y)
-                conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
 
             # ---- student forward ----
             fp_S = cnn_palm_S(palm, return_spatial=False)
@@ -299,14 +311,17 @@ def main():
             logit_S = classifier_S(z_S, y)
             loss_cls = ce(logit_S, y)
 
-            # embedding KD (confidence-weighted)
-            emb_per = cosine_kd_per_sample(z_S, z_T)  # (B,)
-            loss_emb = (emb_per * conf).sum() / (conf.sum() + 1e-6)
+            # DKD loss
+            loss_dkd_val = dkd_loss(
+                logits_student=logit_S,
+                logits_teacher=logit_T,
+                target=y,
+                alpha=args.alpha,
+                beta=args.beta,
+                temperature=args.temperature
+            )
 
-            # relational KD (confidence-weighted)
-            loss_rel = weighted_relational_kd(z_S, z_T, conf)
-
-            loss = args.lambda_cls * loss_cls + lam_emb * loss_emb + lam_rel * loss_rel
+            loss = args.lambda_cls * loss_cls + warmup_factor * loss_dkd_val
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -319,20 +334,18 @@ def main():
             bs = palm.size(0)
             epoch_loss += loss.item() * bs
             epoch_cls += loss_cls.item() * bs
-            epoch_emb += loss_emb.item() * bs
-            epoch_rel += loss_rel.item() * bs
+            epoch_dkd += loss_dkd_val.item() * bs
             correct += (logit_S.argmax(1) == y).sum().item()
             seen += bs
 
-            pbar.set_postfix(loss=f"{loss.item():.4f}", kd_w=f"{w:.2f}", emb=f"{lam_emb:.2f}", rel=f"{lam_rel:.2f}")
+            pbar.set_postfix(loss=f"{loss.item():.4f}", dkd=f"{loss_dkd_val.item():.4f}", w=f"{warmup_factor:.2f}")
 
         avg_loss = epoch_loss / max(seen, 1)
         train_acc = correct / max(seen, 1)
-        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | kd_w={w:.2f}")
+        print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | kd_w={warmup_factor:.2f}")
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/loss_cls", epoch_cls / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_emb", epoch_emb / max(seen, 1), epoch)
-        writer.add_scalar("train/loss_rel", epoch_rel / max(seen, 1), epoch)
+        writer.add_scalar("train/loss_dkd", epoch_dkd / max(seen, 1), epoch)
         writer.add_scalar("train/acc", train_acc, epoch)
 
         # ---- eval every N epochs ----
@@ -366,7 +379,7 @@ def main():
                     }, best_path)
                     print(f"[SAVE] best_eer={best_eer*100:.2f}% -> {best_path}")
 
-    last_path = os.path.join(args.save_dir, "student_last_distill.pth")
+    last_path = os.path.join(args.save_dir, "student_last_dkd.pth")
     torch.save({
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),

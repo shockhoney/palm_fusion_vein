@@ -223,16 +223,12 @@ def main():
     cnn_vein_T = MobileFaceNet(input_channel=3, input_size=224).to(device)
     feat_dim_T = cnn_palm_T.out_dim
 
-    fusion_T = Stage2Fusion(in_dim_global=feat_dim_T, out_dim_final=512, final_l2norm=True).to(device)
-    classifier_T = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
-
+    # CWD only needs teacher backbone spatial features, no fusion/classifier needed
     ckpt = safe_torch_load(args.teacher_ckpt, device)
     cnn_palm_T.load_state_dict(ckpt["cnn_palm"], strict=True)
     cnn_vein_T.load_state_dict(ckpt["cnn_vein"], strict=True)
-    fusion_T.load_state_dict(ckpt["fusion"], strict=True)
-    classifier_T.load_state_dict(ckpt["classifier"], strict=True)
 
-    for m in [cnn_palm_T, cnn_vein_T, fusion_T, classifier_T]:
+    for m in [cnn_palm_T, cnn_vein_T]:
         m.eval()
         for p in m.parameters():
             p.requires_grad = False
@@ -298,13 +294,10 @@ def main():
             vein = vein.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
-            # ---- teacher forward (single pass, no grad) ----
+            # ---- teacher forward: only spatial features needed for CWD ----
             with torch.no_grad():
                 feat_palm_T = cnn_palm_T(palm, return_spatial=True)
                 feat_vein_T = cnn_vein_T(vein, return_spatial=True)
-                fp_T = cnn_palm_T.bn(cnn_palm_T.global_pool(feat_palm_T).flatten(1))
-                fv_T = cnn_vein_T.bn(cnn_vein_T.global_pool(feat_vein_T).flatten(1))
-                z_T = fusion_T(fp_T, fv_T)
 
             # ---- student forward (single pass) ----
             feat_palm_S = cnn_palm_S(palm, return_spatial=True)

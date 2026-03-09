@@ -298,20 +298,19 @@ def main():
             vein = vein.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
-            # ---- teacher forward (no grad) ----
+            # ---- teacher forward (single pass, no grad) ----
             with torch.no_grad():
-                feat_palm_T = cnn_palm_T(palm, return_spatial=True)   # [B,256,H,W]
-                feat_vein_T = cnn_vein_T(vein, return_spatial=True)   # [B,256,H,W]
-                fp_T = cnn_palm_T(palm, return_spatial=False)         # [B,256]
-                fv_T = cnn_vein_T(vein, return_spatial=False)         # [B,256]
-                z_T = fusion_T(fp_T, fv_T)                            # [B,512]
-                _ = classifier_T(z_T, y)                              # keep teacher path complete/consistent
+                feat_palm_T = cnn_palm_T(palm, return_spatial=True)
+                feat_vein_T = cnn_vein_T(vein, return_spatial=True)
+                fp_T = cnn_palm_T.bn(cnn_palm_T.global_pool(feat_palm_T).flatten(1))
+                fv_T = cnn_vein_T.bn(cnn_vein_T.global_pool(feat_vein_T).flatten(1))
+                z_T = fusion_T(fp_T, fv_T)
 
-            # ---- student forward ----
-            feat_palm_S = cnn_palm_S(palm, return_spatial=True)       # [B,256,H,W]
-            feat_vein_S = cnn_vein_S(vein, return_spatial=True)       # [B,256,H,W]
-            fp_S = cnn_palm_S(palm, return_spatial=False)             # [B,256]
-            fv_S = cnn_vein_S(vein, return_spatial=False)             # [B,256]
+            # ---- student forward (single pass) ----
+            feat_palm_S = cnn_palm_S(palm, return_spatial=True)
+            feat_vein_S = cnn_vein_S(vein, return_spatial=True)
+            fp_S = cnn_palm_S.bn(cnn_palm_S.global_pool(feat_palm_S).flatten(1))
+            fv_S = cnn_vein_S.bn(cnn_vein_S.global_pool(feat_vein_S).flatten(1))
             z_S = fusion_S(fp_S, fv_S)
             logit_S = classifier_S(z_S, y)
 

@@ -108,41 +108,36 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
 
 
 # -------------------------
-# CWD loss
+# CWD loss (official implementation from the paper)
+# Channel-wise Knowledge Distillation for Dense Prediction
+# https://arxiv.org/abs/2011.13256
 # -------------------------
 class ChannelWiseDistillationLoss(nn.Module):
-    """
-    Channel-wise KD for dense prediction:
-    For each channel, perform spatial softmax over HxW and minimize KL(teacher || student).
-    """
+    """Official CWD: normalize each channel's spatial activations into a
+    probability map via softmax, then minimize KL divergence between
+    teacher and student distributions."""
 
-    def __init__(self, temperature: float = 4.0, loss_weight: float = 1.0):
+    def __init__(self, tau: float = 1.0, loss_weight: float = 1.0):
         super().__init__()
-        self.temperature = float(temperature)
-        self.loss_weight = float(loss_weight)
+        self.tau = tau
+        self.loss_weight = loss_weight
 
-    def forward(self, student_feat: torch.Tensor, teacher_feat: torch.Tensor) -> torch.Tensor:
-        if student_feat.dim() != 4 or teacher_feat.dim() != 4:
-            raise ValueError(
-                f"CWD expects 4D tensors [B,C,H,W], got {student_feat.shape} and {teacher_feat.shape}"
-            )
-        if student_feat.shape != teacher_feat.shape:
-            raise ValueError(
-                f"CWD requires same shape for student/teacher features, got "
-                f"{student_feat.shape} vs {teacher_feat.shape}"
-            )
+    def forward(self, preds_S: torch.Tensor, preds_T: torch.Tensor) -> torch.Tensor:
+        assert preds_S.shape[-2:] == preds_T.shape[-2:], (
+            f"Spatial size mismatch: {preds_S.shape} vs {preds_T.shape}"
+        )
+        N, C, H, W = preds_S.shape
 
-        b, c, h, w = student_feat.shape
-        t = self.temperature
+        softmax_pred_T = F.softmax(preds_T.view(-1, W * H) / self.tau, dim=1)
 
-        s = student_feat.view(b, c, -1) / t
-        tea = teacher_feat.view(b, c, -1) / t
+        logsoftmax = nn.LogSoftmax(dim=1)
+        loss = torch.sum(
+            softmax_pred_T * logsoftmax(preds_T.view(-1, W * H) / self.tau) -
+            softmax_pred_T * logsoftmax(preds_S.view(-1, W * H) / self.tau)
+        ) * (self.tau ** 2)
 
-        s_log_prob = F.log_softmax(s, dim=-1)
-        t_prob = F.softmax(tea, dim=-1)
-
-        loss = F.kl_div(s_log_prob, t_prob, reduction="none").sum(dim=-1).mean()
-        return self.loss_weight * (t ** 2) * loss
+        loss = self.loss_weight * loss / (C * N)
+        return loss
 
 
 def safe_torch_load(path, device):
@@ -171,7 +166,7 @@ def main():
     # loss weights
     parser.add_argument("--lambda_cls", type=float, default=1.0)
     parser.add_argument("--lambda_cwd", type=float, default=1.0)
-    parser.add_argument("--cwd_temperature", type=float, default=4.0)
+    parser.add_argument("--cwd_temperature", type=float, default=1.0)
 
     args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
@@ -255,17 +250,28 @@ def main():
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
     cwd_loss = ChannelWiseDistillationLoss(
-        temperature=args.cwd_temperature,
+        tau=args.cwd_temperature,
         loss_weight=1.0
     ).to(device)
 
-    optimizer = torch.optim.AdamW(
+    # 1x1 conv to align student channels to teacher channels (if different)
+    if feat_dim_S != feat_dim_T:
+        align_palm = nn.Conv2d(feat_dim_S, feat_dim_T, 1, bias=False).to(device)
+        align_vein = nn.Conv2d(feat_dim_S, feat_dim_T, 1, bias=False).to(device)
+    else:
+        align_palm = None
+        align_vein = None
+
+    optim_params = (
         list(cnn_palm_S.parameters()) +
         list(cnn_vein_S.parameters()) +
         list(fusion_S.parameters()) +
-        list(classifier_S.parameters()),
-        lr=args.lr, weight_decay=args.wd
+        list(classifier_S.parameters())
     )
+    if align_palm is not None:
+        optim_params += list(align_palm.parameters()) + list(align_vein.parameters())
+
+    optimizer = torch.optim.AdamW(optim_params, lr=args.lr, weight_decay=args.wd)
     ce = nn.CrossEntropyLoss()
 
     best_eer = 1e9
@@ -310,21 +316,25 @@ def main():
             logit_S = classifier_S(z_S, y)
 
             loss_cls = ce(logit_S, y)
-            loss_cwd_palm = cwd_loss(feat_palm_S, feat_palm_T.detach())
-            loss_cwd_vein = cwd_loss(feat_vein_S, feat_vein_T.detach())
+
+            # CWD: align channels and spatial size if needed
+            cwd_palm_S = align_palm(feat_palm_S) if align_palm else feat_palm_S
+            cwd_vein_S = align_vein(feat_vein_S) if align_vein else feat_vein_S
+            cwd_palm_T = feat_palm_T.detach()
+            cwd_vein_T = feat_vein_T.detach()
+            if cwd_palm_S.shape[-2:] != cwd_palm_T.shape[-2:]:
+                cwd_palm_S = F.interpolate(cwd_palm_S, size=cwd_palm_T.shape[-2:], mode='bilinear', align_corners=False)
+                cwd_vein_S = F.interpolate(cwd_vein_S, size=cwd_vein_T.shape[-2:], mode='bilinear', align_corners=False)
+
+            loss_cwd_palm = cwd_loss(cwd_palm_S, cwd_palm_T)
+            loss_cwd_vein = cwd_loss(cwd_vein_S, cwd_vein_T)
             loss_cwd = 0.5 * (loss_cwd_palm + loss_cwd_vein)
 
             loss = args.lambda_cls * loss_cls + args.lambda_cwd * loss_cwd
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(cnn_palm_S.parameters()) +
-                list(cnn_vein_S.parameters()) +
-                list(fusion_S.parameters()) +
-                list(classifier_S.parameters()),
-                1.0
-            )
+            torch.nn.utils.clip_grad_norm_(optim_params, 1.0)
             optimizer.step()
 
             bs = palm.size(0)

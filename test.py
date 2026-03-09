@@ -19,9 +19,9 @@ class Config:
     num_workers = 4
     nir_list = "data_txt/PolyU_palmvein_list.txt"
     red_list = "data_txt/PolyU_palmprint_list.txt"
-    phase2_pair_txt = "data_txt/PolyU_phase2_test.txt"
-    backbone ='mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
-    stage2_ckpt = os.path.join("outputs", "PolyU_models", "stage2_best.pth")
+    phase2_pair_txt = "data_txt/polyu_phase2_test.txt"
+    backbone ='tiny_mobilefacenet'  # 'tiny_mobilefacenet' or 'mobilefacenet'
+    stage2_ckpt = os.path.join("outputs_distill", "FGD_models", "student_last_fgd.pth")
  
 
 @torch.no_grad()
@@ -104,7 +104,7 @@ def main():
 
     cnn_palm, feat_dim, local_dim = build_backbone(cfg.backbone)
     cnn_vein, _, _ = build_backbone(cfg.backbone)
-    #fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(device)
+    # fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(device)
     
     fusion_model = Stage2FusionStudent_BottleneckGate( in_dim_global=feat_dim, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True).to(device)
 

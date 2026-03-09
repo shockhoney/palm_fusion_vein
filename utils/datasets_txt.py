@@ -66,6 +66,7 @@ class TxtImageDataset:
                     continue
 
                 label = int(label_str)
+                img_path = os.path.join(PROJECT_ROOT, img_path)
 
                 self.samples.append((img_path, label))
 
@@ -150,6 +151,9 @@ class PairTxtDataset:
                 palm_path = vi_path.replace("\\", "/")
                 vein_path = ir_path.replace("\\", "/")
                 label = int(label_str)
+
+                palm_path = os.path.join(PROJECT_ROOT, palm_path)
+                vein_path = os.path.join(PROJECT_ROOT, vein_path)
 
                 self.samples.append((palm_path, vein_path, label))
 

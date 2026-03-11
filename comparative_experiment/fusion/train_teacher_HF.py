@@ -1,34 +1,61 @@
 import warnings
 warnings.filterwarnings('ignore')
 import os
+import sys
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "../../"))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
 from models.student_mobilefacenet import TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
-from models.stage2 import Stage2Fusion
 
 from utils.head import Arcface_Head 
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
+class Stage2FusionHF(nn.Module):
+    def __init__(self, in_dim=256, num_classes=500):
+        super(Stage2FusionHF, self).__init__()
+        self.palm_classifier = Arcface_Head(embedding_size=in_dim, num_classes=num_classes, s=30.0, m=0.20)
+        self.vein_classifier = Arcface_Head(embedding_size=in_dim, num_classes=num_classes, s=30.0, m=0.20)
+        
+        # Learnable adaptive weights (analogous to Wasserstein weights)
+        self.weights = nn.Parameter(torch.ones(2)) 
+        
+    def forward(self, palm_feat, vein_feat, labels=None):
+        palm_scores = self.palm_classifier(palm_feat, labels)
+        vein_scores = self.vein_classifier(vein_feat, labels)
+        
+        w = torch.softmax(self.weights, dim=0)
+        fused_scores = w[0] * palm_scores + w[1] * vein_scores
+        
+        return fused_scores
+from utils.datasets_txt import TxtImageDataset, PairTxtDataset
+
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
-    save_dir = 'outputs/models'
+    save_dir = os.path.join(project_root, 'outputs/polyu_models')
     backbone = 'mobilefacenet'  
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'data_txt/CASIA_palmprint_list.txt'
-    list_file_vein = 'data_txt/CASIA_palmvein_list.txt'
-    phase2_train = 'data_txt/CASIA_phase2_train.txt'
-    phase2_val = 'data_txt/CASIA_phase2_val.txt'
+    # Use project_root to get absolute paths for the data lists
+    list_file_palm = os.path.join(project_root, 'data_txt/polyu_palmprint_list.txt')
+    list_file_vein = os.path.join(project_root, 'data_txt/polyu_palmvein_list.txt')
+    phase2_train = os.path.join(project_root, 'data_txt/polyu_phase2_train.txt')
+    phase2_val = os.path.join(project_root, 'data_txt/polyu_phase2_val.txt')
 
     p1_epochs, p1_batch, p1_lr = 200, 8, 1e-2
     p1_patience = 100
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 8, 1e-3, 1e-4
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 60, 8, 1e-3, 1e-4
     p2_patience = 100
 
 config = Config()
@@ -254,30 +281,25 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
     train_loader, val_loader, num_classes = create_phase2_dataloaders( config.phase2_train,config.phase2_val,config.p2_batch)
 
-    fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(config.device)
+    fusion_model = Stage2FusionHF(in_dim=feat_dim, num_classes=num_classes).to(config.device)
 
-    classifier = Arcface_Head(
-        embedding_size=512,
-        num_classes=num_classes,
-        s=30.0,
-        m=0.20,
-    ).to(config.device)
-    # classifier = nn.Linear(2*feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
+    for param in cnn_palm.parameters():
+        param.requires_grad = False
+    for param in cnn_vein.parameters():
+        param.requires_grad = False
+
     optimizer = torch.optim.Adam([
-        {'params': fusion_model.parameters(), 'lr': config.p2_lr},
-        {'params': cnn_palm.parameters(), 'lr': config.p2_enc_lr},
-        {'params': cnn_vein.parameters(), 'lr': config.p2_enc_lr},
-        {'params': classifier.parameters(), 'lr': config.p2_lr}], weight_decay=1e-4)  
+        {'params': fusion_model.parameters(), 'lr': config.p2_lr}], weight_decay=1e-4)  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
     early_stop = EarlyStopping(patience=config.p2_patience)
     best_acc = 0.0
  
     for epoch in range(config.p2_epochs):
-        cnn_palm.train()
-        cnn_vein.train()
+        cnn_palm.eval()
+        cnn_vein.eval()
         fusion_model.train()
 
         train_loss, train_correct, train_total = 0.0, 0, 0
@@ -294,18 +316,13 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
             F_palm = cnn_palm(palm_img, return_spatial=False)
             F_vein = cnn_vein(vein_img, return_spatial=False)
 
-            fused_feat = fusion_model(F_palm, F_vein)
-
-            logits = classifier(fused_feat, labels)
+            logits = fusion_model(F_palm, F_vein, labels)
             loss = ce_loss(logits, labels)
             optimizer.zero_grad()
 
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(cnn_palm.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(cnn_vein.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(fusion_model.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(classifier.parameters(),   1.0)
 
             optimizer.step()
 
@@ -323,7 +340,6 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
         cnn_palm.eval()
         cnn_vein.eval()
         fusion_model.eval()
-        classifier.eval()
 
         val_total_loss, val_correct, val_total = 0.0, 0, 0  
         with torch.no_grad():
@@ -336,9 +352,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 palm_global = cnn_palm(palm_img, return_spatial=False)
                 vein_global = cnn_vein(vein_img, return_spatial=False)
 
-                fused_feat = fusion_model(palm_global, vein_global)
-
-                logits = classifier(fused_feat, labels)
+                logits = fusion_model(palm_global, vein_global, labels)
                 loss = ce_loss(logits, labels)
                 val_total_loss += loss.item()
 
@@ -369,9 +383,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
             torch.save({
                 'cnn_palm': cnn_palm.state_dict(),
                 'cnn_vein': cnn_vein.state_dict(),
-                'fusion': fusion_model.state_dict(),
-                'classifier': classifier.state_dict()
-            }, os.path.join(config.save_dir, 'stage2_best.pth'))
+                'fusion': fusion_model.state_dict()
+            }, os.path.join(config.save_dir, 'stage2_HF_best.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"Early stopping at epoch {epoch+1}")
@@ -388,7 +401,7 @@ def main():
     cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
     cnn_vein, _, _ = build_backbone(config.backbone)
 
-    skip_stage1 = False  # 设置为 True 跳过 Stage 1
+    skip_stage1 = True  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
 

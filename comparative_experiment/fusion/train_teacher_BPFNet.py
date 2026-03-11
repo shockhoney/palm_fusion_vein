@@ -1,34 +1,121 @@
 import warnings
 warnings.filterwarnings('ignore')
 import os
+import sys
+
+# Add the project root directory to sys.path so 'models' can be imported
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "../../"))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
 from models.student_mobilefacenet import TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
-from models.stage2 import Stage2Fusion
-
 from utils.head import Arcface_Head 
+from utils.datasets_txt import TxtImageDataset, PairTxtDataset
+
+class CrossModalSelection(nn.Module):
+    def __init__(self):
+        super(CrossModalSelection, self).__init__()
+
+    def forward(self, palm_feat, vein_feat):
+        '''
+        palm_feat, vein_feat: [B, C, H, W]
+        '''
+        B, C, H, W = palm_feat.size()
+        
+        # Flatten spatial dimensions
+        P_flat = palm_feat.view(B, C, -1) # [B, C, H*W]
+        V_flat = vein_feat.view(B, C, -1) # [B, C, H*W]
+        
+        # Normalize features along spatial dimensions to compute cosine similarity
+        P_norm = F.normalize(P_flat, p=2, dim=2)
+        V_norm = F.normalize(V_flat, p=2, dim=2)
+        
+        # Correlation matrix r [B, C, C] where r[b, i, j] is sim(P_i, V_j)
+        # P_norm: [B, C, H*W], V_norm: [B, C, H*W]
+        # P_norm @ V_norm.transpose(1, 2) -> [B, C, C]
+        r = torch.bmm(P_norm, V_norm.transpose(1, 2))
+        
+        # For each palm channel i, find the vein channel k with max correlation
+        # r: [B, C (palm), C (vein)] -> target is max over vein channels (dim=2)
+        _, max_indices = torch.max(r, dim=2) # [B, C]
+        
+        # Select the corresponding vein features
+        # Expand indices to match V_flat dimensions for gather
+        # max_indices: [B, C] -> [B, C, H*W]
+        gather_indices = max_indices.unsqueeze(-1).expand(B, C, H * W)
+        V_selected = torch.gather(V_flat, dim=1, index=gather_indices) # [B, C, H*W]
+        
+        # Reshape back to spatial dimensions
+        V_selected = V_selected.view(B, C, H, W)
+        
+        # Summation
+        fused_feat = palm_feat + V_selected
+        
+        return fused_feat
+
+class Stage2FusionBPFNet(nn.Module):
+    def __init__(self, in_dim_global=256, out_dim_final=512, final_l2norm=True):
+        super(Stage2FusionBPFNet, self).__init__()
+        self.final_l2norm = final_l2norm
+        
+        # Use two simple conv layers for further high-level feature extraction
+        # per the paper: "After feature enhancement, two ResBlocks are added" 
+        # Using basic ConvBlocks here for simplicity as a drop-in replacement
+        from models.stage1_mobileFacenet import ConvBlock, DepthWiseResidual
+        self.cross_modal_selection = CrossModalSelection()
+        
+        self.fusion_blocks = nn.Sequential(
+            DepthWiseResidual(in_dim_global, in_dim_global, kernel=(3, 3), padding=(1, 1), stride=(1, 1), groups=in_dim_global),
+            DepthWiseResidual(in_dim_global, in_dim_global, kernel=(3, 3), padding=(1, 1), stride=(1, 1), groups=in_dim_global),
+            ConvBlock(in_dim_global, out_dim_final, kernel=(1, 1), stride=(1, 1), padding=(0, 0))
+        )
+        
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.bn = nn.BatchNorm1d(out_dim_final)
+
+    def forward(self, palm_feat, vein_feat):
+        # Apply Cross-Modal Selection
+        fused = self.cross_modal_selection(palm_feat, vein_feat)
+        
+        # Apply fusion blocks
+        fused = self.fusion_blocks(fused)
+        
+        # Global Average Pooling
+        out = self.global_pool(fused).flatten(1)
+        out = self.bn(out)
+        
+        if self.final_l2norm:
+            import torch.nn.functional as F
+            out = F.normalize(out, p=2, dim=1)
+            
+        return out 
 from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
-    save_dir = 'outputs/models'
+    save_dir = os.path.join(project_root, 'outputs/polyu_models')
     backbone = 'mobilefacenet'  
     input_size = 224
     num_workers = 8
 
-    list_file_palm = 'data_txt/CASIA_palmprint_list.txt'
-    list_file_vein = 'data_txt/CASIA_palmvein_list.txt'
-    phase2_train = 'data_txt/CASIA_phase2_train.txt'
-    phase2_val = 'data_txt/CASIA_phase2_val.txt'
+    # Use project_root to get absolute paths for the data lists
+    list_file_palm = os.path.join(project_root, 'data_txt/polyu_palmprint_list.txt')
+    list_file_vein = os.path.join(project_root, 'data_txt/polyu_palmvein_list.txt')
+    phase2_train = os.path.join(project_root, 'data_txt/polyu_phase2_train.txt')
+    phase2_val = os.path.join(project_root, 'data_txt/polyu_phase2_val.txt')
 
     p1_epochs, p1_batch, p1_lr = 200, 8, 1e-2
     p1_patience = 100
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 8, 1e-3, 1e-4
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 80, 8, 1e-3, 1e-4
     p2_patience = 100
 
 config = Config()
@@ -254,7 +341,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
     train_loader, val_loader, num_classes = create_phase2_dataloaders( config.phase2_train,config.phase2_val,config.p2_batch)
 
-    fusion_model = Stage2Fusion(in_dim_global=feat_dim,out_dim_final=512,final_l2norm=True).to(config.device)
+    fusion_model = Stage2FusionBPFNet(in_dim_global=feat_dim, out_dim_final=512, final_l2norm=True).to(config.device)
 
     classifier = Arcface_Head(
         embedding_size=512,
@@ -265,10 +352,13 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
     # classifier = nn.Linear(2*feat_dim, num_classes).to(config.device)
     ce_loss = nn.CrossEntropyLoss()
 
+    for param in cnn_palm.parameters():
+        param.requires_grad = False
+    for param in cnn_vein.parameters():
+        param.requires_grad = False
+
     optimizer = torch.optim.Adam([
         {'params': fusion_model.parameters(), 'lr': config.p2_lr},
-        {'params': cnn_palm.parameters(), 'lr': config.p2_enc_lr},
-        {'params': cnn_vein.parameters(), 'lr': config.p2_enc_lr},
         {'params': classifier.parameters(), 'lr': config.p2_lr}], weight_decay=1e-4)  
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.p2_epochs)
 
@@ -276,8 +366,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
     best_acc = 0.0
  
     for epoch in range(config.p2_epochs):
-        cnn_palm.train()
-        cnn_vein.train()
+        cnn_palm.eval()
+        cnn_vein.eval()
         fusion_model.train()
 
         train_loss, train_correct, train_total = 0.0, 0, 0
@@ -291,8 +381,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
             vein_img = vein_img.to(config.device)
             labels = labels.to(config.device)
 
-            F_palm = cnn_palm(palm_img, return_spatial=False)
-            F_vein = cnn_vein(vein_img, return_spatial=False)
+            F_palm = cnn_palm(palm_img, return_spatial=True)
+            F_vein = cnn_vein(vein_img, return_spatial=True)
 
             fused_feat = fusion_model(F_palm, F_vein)
 
@@ -302,8 +392,6 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
             loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(cnn_palm.parameters(), 1.0)
-            torch.nn.utils.clip_grad_norm_(cnn_vein.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(fusion_model.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(classifier.parameters(),   1.0)
 
@@ -333,8 +421,8 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 vein_img = vein_img.to(config.device)
                 labels = labels.to(config.device)
 
-                palm_global = cnn_palm(palm_img, return_spatial=False)
-                vein_global = cnn_vein(vein_img, return_spatial=False)
+                palm_global = cnn_palm(palm_img, return_spatial=True)
+                vein_global = cnn_vein(vein_img, return_spatial=True)
 
                 fused_feat = fusion_model(palm_global, vein_global)
 
@@ -371,7 +459,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
                 'cnn_vein': cnn_vein.state_dict(),
                 'fusion': fusion_model.state_dict(),
                 'classifier': classifier.state_dict()
-            }, os.path.join(config.save_dir, 'stage2_best.pth'))
+            }, os.path.join(config.save_dir, 'stage2_BPFNet_best.pth'))
 
         if early_stop(-avg_val_acc, mode='min'):
             print(f"Early stopping at epoch {epoch+1}")
@@ -388,7 +476,7 @@ def main():
     cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
     cnn_vein, _, _ = build_backbone(config.backbone)
 
-    skip_stage1 = False  # 设置为 True 跳过 Stage 1
+    skip_stage1 = True  # 设置为 True 跳过 Stage 1
 
     if not skip_stage1:
 

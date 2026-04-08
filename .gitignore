@@ -1,6 +1,5 @@
 # dataset
 data/
-data.zip
 data_txt/
 
 # python cache
@@ -32,7 +31,6 @@ events.out.tfevents.*
 # local experiment scripts
 comparative_experiment/
 sem_CKD_student_mobilefacenet.py
-test.py
 test-copy.py
 
 !requirements.txt

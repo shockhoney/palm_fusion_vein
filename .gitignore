@@ -1,6 +1,7 @@
 #dataset
 data/
 data.zip
+data_txt/
 #python cache
 __pycache__/
 #logs 
@@ -22,3 +23,16 @@ SPIE_journal_papers__sample_manuscript_showing_style_and_formatting_specificatio
 *PDF
 #json files
 *json_files
+
+article/
+
+outputs/
+outputs_distill/
+paper/
+
+runs/
+runs_all/
+
+comparative_experiments/
+sem_CKD_student_mobilefacenet.py
+test-copy.py

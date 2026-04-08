@@ -37,31 +37,7 @@
 | ChannelAttentionFusion | 通道注意力融合，自适应学习模态权重 |
 | Stage2FusionStudent_BottleneckGate | 学生融合模块，采用瓶颈结构与门控机制 |
 
-## 项目结构
 
-```
-palm_fusion_vein/
-├── train_teacher.py          # 教师模型两阶段训练
-├── train_s_vkd.py            # 知识蒸馏训练学生模型
-├── test.py                   # 模型测试与评估
-├── lightweight_metrics.py    # 模型轻量化指标统计
-├── requirements.txt          # 依赖库
-├── models/
-│   ├── stage1_mobileFacenet.py      # MobileFaceNet骨干网络
-│   ├── student_mobilefacenet.py     # TinyMobileFaceNet轻量化骨干
-│   ├── stage2.py                    # 教师融合模块
-│   └── student_fusion.py            # 学生融合模块
-├── utils/
-│   ├── datasets_txt.py       # 数据集加载
-│   ├── datastage2.py         # 阶段二数据处理
-│   ├── head.py               # ArcFace分类头
-│   └── metrics.py            # 评估指标(EER, TAR@FAR, AUC)
-├── roi_extraction/
-│   ├── mp_roi_extraction.py  # MediaPipe ROI提取
-│   └── trad_roi_extraction.py # 传统方法ROI提取
-├── data/                     # 数据集目录
-├── outputs/                  # 模型输出
-└── runs_distill/             # TensorBoard日志
 ```
 
 ## 环境配置
@@ -131,18 +107,6 @@ python test.py
 
 测试配置（位于脚本内Config类）：
 
-## 评估指标
-
-| 指标 | 描述 |
-|------|------|
-| EER (Equal Error Rate) | 等错误率，FAR=FRR时的错误率 |
-| TAR@FAR | 指定假接受率下的真接受率 |
-| AUC | ROC曲线下面积 |
-| ACC | 分类准确率 |
-
-## 输出文件
-
-训练产生的模型保存于 `outputs/models/`：
 
 ## 引用
 

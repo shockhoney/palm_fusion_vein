@@ -1,38 +1,38 @@
-#dataset
+# dataset
 data/
 data.zip
 data_txt/
-#python cache
+
+# python cache
 __pycache__/
-#logs 
-#files_processed
-utils/file_processing/
-.vscode/
 utils/__pycache__/
-#checkpoints
-# outputs/models/ 
 
-#txtfiles
+# local tooling
+.vscode/
+utils/file_processing/
 
-!requirements.txt
-
-# 论文
+# papers
 SPIE_journal_papers__sample_manuscript_showing_style_and_formatting_specifications/
-
-#pdfs
+article/
+paper/
 *PDF
-#json files
 *json_files
 
-article/
-
+# training outputs
 outputs/
 outputs_distill/
-paper/
-
 runs/
 runs_all/
+**/runs/
+*.pth
+*.pt
+*.ckpt
+events.out.tfevents.*
 
-comparative_experiments/
+# local experiment scripts
+comparative_experiment/
 sem_CKD_student_mobilefacenet.py
+test.py
 test-copy.py
+
+!requirements.txt

@@ -5,7 +5,13 @@ from PIL import Image
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp')
 
-def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=0.1,seed=42):
+def gen_polyu_list(root_dir, out_txt="polyu_list.txt", train_ratio=0.8, val_ratio=0.1, seed=42):
+    """Generate identity-disjoint train/test lists.
+
+    Identities are first split into train and test. Images from train identities
+    are then split into train/val, while all images from test identities remain
+    in test.
+    """
     random.seed(seed)
 
     all_pids = sorted([
@@ -13,6 +19,11 @@ def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=
         if os.path.isdir(os.path.join(root_dir, d))
     ])
     pid2label = {pid: idx for idx, pid in enumerate(all_pids)}
+
+    shuffled_pids = all_pids[:]
+    random.shuffle(shuffled_pids)
+    n_train_ids = int(len(shuffled_pids) * train_ratio)
+    train_pids = set(shuffled_pids[:n_train_ids])
 
     lines = []
 
@@ -25,18 +36,18 @@ def gen_polyu_list( root_dir,out_txt="polyu_list.txt",train_ratio=0.8,val_ratio=
         if not imgs:
             continue
 
-        random.shuffle(imgs)
-        n = len(imgs)
-        n_train = int(n * train_ratio)
-        n_val = int(n * val_ratio)
+        if pid in train_pids:
+            random.shuffle(imgs)
+            n_val = int(len(imgs) * val_ratio)
+            split_by_img = {
+                img_name: ("val" if i < n_val else "train")
+                for i, img_name in enumerate(imgs)
+            }
+        else:
+            split_by_img = {img_name: "test" for img_name in imgs}
 
-        for i, img_name in enumerate(imgs):
-            if i < n_train:
-                split = "train"
-            elif i < n_train + n_val:
-                split = "val"
-            else:
-                split = "test"
+        for img_name in imgs:
+            split = split_by_img[img_name]
 
             img_path = os.path.relpath(os.path.join(person_dir, img_name)).replace("\\", "/")
             label = pid2label[pid]
@@ -84,7 +95,8 @@ class TxtImageDataset:
         return img, label
 
 
-def phase2_list(root_dir,train_txt,val_txt,val_ratio = 0.2,seed = 42):
+def phase2_list(root_dir, train_txt, val_txt, val_ratio=0.1, seed=42, train_ratio=0.8, test_txt=None):
+    """Generate paired lists with identity-disjoint test identities."""
 
     ir_dir = os.path.join(root_dir, "ir")
     vi_dir = os.path.join(root_dir, "vi")
@@ -114,22 +126,37 @@ def phase2_list(root_dir,train_txt,val_txt,val_ratio = 0.2,seed = 42):
         ir_path_norm = os.path.relpath(ir_path).replace("\\", "/")
         vi_path_norm = os.path.relpath(vi_path).replace("\\", "/")
 
-        pairs.append(f"{ir_path_norm} {vi_path_norm} {label}\n")
+        pairs.append(f"{vi_path_norm} {ir_path_norm} {label}\n")
 
+    by_label = {}
+    for line in pairs:
+        label = int(line.strip().split()[2])
+        by_label.setdefault(label, []).append(line)
+
+    labels = sorted(by_label)
     random.seed(seed)
-    random.shuffle(pairs)
+    random.shuffle(labels)
+    n_train_ids = int(len(labels) * train_ratio) if test_txt else len(labels)
+    train_labels = set(labels[:n_train_ids])
 
-    n_total = len(pairs)
-    n_val = max(1, int(n_total * val_ratio))
-    n_train = n_total - n_val
-
-    val_pairs = pairs[:n_val]
-    train_pairs = pairs[n_val:]
+    train_pairs, val_pairs, test_pairs = [], [], []
+    for label in labels:
+        label_pairs = by_label[label]
+        if label in train_labels:
+            random.shuffle(label_pairs)
+            n_val = int(len(label_pairs) * val_ratio)
+            val_pairs.extend(label_pairs[:n_val])
+            train_pairs.extend(label_pairs[n_val:])
+        else:
+            test_pairs.extend(label_pairs)
 
     with open(train_txt, "w", encoding="utf-8") as f:
         f.writelines(train_pairs)
     with open(val_txt, "w", encoding="utf-8") as f:
         f.writelines(val_pairs)
+    if test_txt:
+        with open(test_txt, "w", encoding="utf-8") as f:
+            f.writelines(test_pairs)
 
 class PairTxtDataset:
 
@@ -146,10 +173,10 @@ class PairTxtDataset:
                 parts = line.split()
                 if len(parts) < 3:
                     continue
-                ir_path, vi_path, label_str = parts[:3]
+                palm_path, vein_path, label_str = parts[:3]
 
-                palm_path = vi_path.replace("\\", "/")
-                vein_path = ir_path.replace("\\", "/")
+                palm_path = palm_path.replace("\\", "/")
+                vein_path = vein_path.replace("\\", "/")
                 label = int(label_str)
 
                 palm_path = os.path.join(PROJECT_ROOT, palm_path)
@@ -183,12 +210,12 @@ if __name__ == '__main__':
     os.chdir(PROJECT_ROOT)
     gen_polyu_list("data/CASIA/ir",
         out_txt="data_txt/CASIA_palmvein_list.txt",
-        train_ratio=0.67,
-        val_ratio=0.33,
+        train_ratio=0.8,
+        val_ratio=0.1,
         seed=42)
     gen_polyu_list("data/CASIA/vi",
         out_txt="data_txt/CASIA_palmprint_list.txt",
-        train_ratio=0.67,
-        val_ratio=0.33,
+        train_ratio=0.8,
+        val_ratio=0.1,
         seed=42)
 

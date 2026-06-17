@@ -1,6 +1,9 @@
 import warnings
 warnings.filterwarnings('ignore')
 import os
+import argparse
+import random
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -20,6 +23,7 @@ class Config:
     backbone = 'mobilefacenet'  
     input_size = 224
     num_workers = 8
+    seed = 42
 
     list_file_palm = 'data_txt/CASIA_palmprint_list.txt'
     list_file_vein = 'data_txt/CASIA_palmvein_list.txt'
@@ -32,7 +36,25 @@ class Config:
     p2_patience = 100
 
 config = Config()
-os.makedirs(config.save_dir, exist_ok=True)
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+def make_generator(seed):
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
 
 def build_backbone(name):
     name = name.lower()
@@ -100,8 +122,16 @@ def create_dataloaders_from_txt(list_file, batch_size):
     labels = [label for _, label in train_dataset.samples]
     num_classes = max(labels) + 1 if labels else 0
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=config.num_workers)
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=config.num_workers)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=config.num_workers, worker_init_fn=seed_worker,
+        generator=make_generator(config.seed)
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=config.num_workers, worker_init_fn=seed_worker,
+        generator=make_generator(config.seed + 1)
+    )
 
     return train_loader, val_loader, num_classes
 
@@ -119,13 +149,17 @@ def create_phase2_dataloaders(train_list, val_list, batch_size):
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=config.num_workers
+        num_workers=config.num_workers,
+        worker_init_fn=seed_worker,
+        generator=make_generator(config.seed + 2)
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=config.num_workers
+        num_workers=config.num_workers,
+        worker_init_fn=seed_worker,
+        generator=make_generator(config.seed + 3)
     )
     return train_loader, val_loader, num_classes
 
@@ -383,7 +417,20 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
     return best_acc
 
 def main():
-    writer = SummaryWriter(log_dir='runs')
+    parser = argparse.ArgumentParser("Train teacher fusion model")
+    parser.add_argument("--seed", type=int, default=config.seed)
+    parser.add_argument("--save_dir", type=str, default=config.save_dir)
+    parser.add_argument("--run_name", type=str, default=None)
+    args = parser.parse_args()
+
+    config.seed = args.seed
+    run_name = args.run_name
+    config.save_dir = os.path.join(args.save_dir, run_name) if run_name else args.save_dir
+    os.makedirs(config.save_dir, exist_ok=True)
+    set_seed(config.seed)
+
+    log_dir = os.path.join('runs', run_name or f"seed_{args.seed}")
+    writer = SummaryWriter(log_dir=log_dir)
 
     cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
     cnn_vein, _, _ = build_backbone(config.backbone)

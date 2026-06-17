@@ -1,5 +1,6 @@
 import os
 import argparse
+import random
 import numpy as np
 
 import torch
@@ -18,6 +19,27 @@ from models.stage1_mobileFacenet import MobileFaceNet
 from models.student_mobilefacenet import TinyMobileFaceNet
 from models.stage2 import Stage2Fusion
 from models.student_fusion import Stage2FusionStudent_BottleneckGate
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def make_generator(seed):
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
 
 
 # -------------------------
@@ -143,6 +165,8 @@ def main():
     parser.add_argument("--val_list", type=str, default="data_txt/polyu_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/polyu_models/stage2_best.pth")
     parser.add_argument("--save_dir", type=str, default="outputs/models")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--run_name", type=str, default=None)
 
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -159,9 +183,12 @@ def main():
     parser.add_argument("--ramp_epochs", type=int, default=20)
 
     args = parser.parse_args()
+    run_name = args.run_name
+    args.save_dir = os.path.join(args.save_dir, run_name) if run_name else args.save_dir
     os.makedirs(args.save_dir, exist_ok=True)
+    set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "runs_distill"))
+    writer = SummaryWriter(log_dir=os.path.join(args.save_dir, "runs_distill", run_name or f"seed_{args.seed}"))
 
     # -------------------------
     # num_classes from train_list
@@ -172,7 +199,7 @@ def main():
             p = line.strip().split()
             if len(p) >= 3:
                 label_set.add(int(p[2]))
-    num_classes = len(label_set)
+    num_classes = max(label_set) + 1 if label_set else 0
     print(f"[Info] num_classes = {num_classes}")
 
     # -------------------------
@@ -199,11 +226,13 @@ def main():
 
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True, drop_last=True,
-        num_workers=4, pin_memory=True
+        num_workers=4, pin_memory=True, worker_init_fn=seed_worker,
+        generator=make_generator(args.seed)
     )
     val_loader = DataLoader(
         val_set, batch_size=args.batch_size, shuffle=False,
-        num_workers=4, pin_memory=True
+        num_workers=4, pin_memory=True, worker_init_fn=seed_worker,
+        generator=make_generator(args.seed + 1)
     )
 
     # -------------------------
@@ -248,6 +277,9 @@ def main():
 
     best_eer = 1e9
     best_path = os.path.join(args.save_dir, "student_best_distill.pth")
+    conf_stats_path = os.path.join(args.save_dir, "teacher_confidence_stats.csv")
+    with open(conf_stats_path, "w", encoding="utf-8") as f:
+        f.write("epoch,count,mean,std,min,p10,p50,p90,max\n")
 
     # -------------------------
     # Train
@@ -268,6 +300,7 @@ def main():
         epoch_rel = 0.0
         correct = 0
         seen = 0
+        conf_values = []
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", dynamic_ncols=True)
         for palm, vein, y in pbar:
@@ -282,6 +315,7 @@ def main():
                 z_T = fusion_T(fp_T, fv_T)  # (B,512)
                 logit_T = classifier_T(z_T, y)
                 conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
+                conf_values.append(conf.detach().cpu().numpy())
 
             # ---- student forward ----
             fp_S = cnn_palm_S(palm, return_spatial=False)
@@ -320,6 +354,17 @@ def main():
 
         avg_loss = epoch_loss / max(seen, 1)
         train_acc = correct / max(seen, 1)
+        if conf_values:
+            conf_epoch = np.concatenate(conf_values)
+            with open(conf_stats_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"{epoch},{conf_epoch.size},{conf_epoch.mean():.6f},{conf_epoch.std():.6f},"
+                    f"{conf_epoch.min():.6f},{np.percentile(conf_epoch, 10):.6f},"
+                    f"{np.percentile(conf_epoch, 50):.6f},{np.percentile(conf_epoch, 90):.6f},"
+                    f"{conf_epoch.max():.6f}\n"
+                )
+            if epoch == args.epochs:
+                np.save(os.path.join(args.save_dir, "teacher_confidence_last_epoch.npy"), conf_epoch)
         print(f"Epoch [{epoch}/{args.epochs}] avg_loss={avg_loss:.4f} acc={train_acc*100:.2f}% | kd_w={w:.2f}")
         writer.add_scalar("train/loss", avg_loss, epoch)
         writer.add_scalar("train/loss_cls", epoch_cls / max(seen, 1), epoch)

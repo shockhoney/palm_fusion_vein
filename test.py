@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from models.stage2 import Stage2Fusion
+from models.student_fusion import Stage2FusionStudent_BottleneckGate
 from train_teacher import build_backbone, config as train_config, get_transforms
 from utils.datasets_txt import PairTxtDataset, TxtImageDataset
 from utils.metrics import compute_eer, far_frr_acc_at_threshold, roc_auc, tar_at_far
@@ -37,6 +38,17 @@ def build_pair_scores(features, labels):
     labels = np.asarray(labels)
     i, j = np.triu_indices(labels.shape[0], k=1)
     return sim[i, j], (labels[i] == labels[j]).astype(int), i, j
+
+
+def build_fusion_model(fusion_type, backbone, feat_dim, ckpt):
+    if fusion_type == "auto":
+        fusion_type = ckpt.get("student_fusion")
+        if fusion_type is None:
+            fusion_type = "bottleneck_gate" if backbone == "mobilefacenet" else "stage2"
+
+    if fusion_type == "bottleneck_gate":
+        return Stage2FusionStudent_BottleneckGate(in_dim_global=feat_dim, out_dim_final=512, final_l2norm=True)
+    return Stage2Fusion(in_dim_global=feat_dim, out_dim_final=512, final_l2norm=True)
 
 
 def eval_with_metrics(scores, pair_labels, name, out_csv=None):
@@ -100,6 +112,7 @@ def main():
     parser = argparse.ArgumentParser("Evaluate palmprint/palm-vein verification")
     parser.add_argument("--ckpt", default="outputs/models/student_last_distill.pth")
     parser.add_argument("--backbone", default="mobilefacenet", choices=["mobilefacenet", "resnet18"])
+    parser.add_argument("--fusion", default="auto", choices=["auto", "stage2", "bottleneck_gate"])
     parser.add_argument("--palm_list", default="data_txt/PolyU_palmprint_list.txt")
     parser.add_argument("--vein_list", default="data_txt/PolyU_palmvein_list.txt")
     parser.add_argument("--pair_txt", default="data_txt/polyu_phase2_test.txt")
@@ -113,13 +126,13 @@ def main():
 
     device = torch.device(args.device)
     train_config.device = str(device)
+    ckpt = safe_torch_load(args.ckpt, device)
     cnn_palm, feat_dim, _ = build_backbone(args.backbone)
     cnn_vein, _, _ = build_backbone(args.backbone)
     cnn_palm.to(device)
     cnn_vein.to(device)
-    fusion_model = Stage2Fusion(in_dim_global=feat_dim, out_dim_final=512, final_l2norm=True).to(device)
+    fusion_model = build_fusion_model(args.fusion, args.backbone, feat_dim, ckpt).to(device)
 
-    ckpt = safe_torch_load(args.ckpt, device)
     cnn_palm.load_state_dict(ckpt["cnn_palm"])
     cnn_vein.load_state_dict(ckpt["cnn_vein"])
     fusion_model.load_state_dict(ckpt["fusion"])

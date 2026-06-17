@@ -18,6 +18,7 @@ from utils.head import Arcface_Head
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.resnet18_encoder import ResNet18Encoder
 from models.stage2 import Stage2Fusion
+from models.student_fusion import Stage2FusionStudent_BottleneckGate
 
 def set_seed(seed):
     random.seed(seed)
@@ -258,13 +259,15 @@ def main():
             p.requires_grad = False
 
     # -------------------------
-    # Student: MobileFaceNet + Stage2Fusion + classifier
+    # Student: MobileFaceNet + bottleneck-gated fusion + classifier
     # -------------------------
     cnn_palm_S = MobileFaceNet(input_channel=3, input_size=224).to(device)
     cnn_vein_S = MobileFaceNet(input_channel=3, input_size=224).to(device)
     feat_dim_S = cnn_palm_S.out_dim
 
-    fusion_S = Stage2Fusion(in_dim_global=feat_dim_S, out_dim_final=512, final_l2norm=True).to(device)
+    fusion_S = Stage2FusionStudent_BottleneckGate(
+        in_dim_global=feat_dim_S, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True
+    ).to(device)
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -405,7 +408,9 @@ def main():
                     best_eer = eer
                     torch.save({
                         "teacher_backbone": "resnet18",
+                        "teacher_fusion": "stage2",
                         "student_backbone": "mobilefacenet",
+                        "student_fusion": "bottleneck_gate",
                         "cnn_palm": cnn_palm_S.state_dict(),
                         "cnn_vein": cnn_vein_S.state_dict(),
                         "fusion": fusion_S.state_dict(),
@@ -418,7 +423,9 @@ def main():
     last_path = os.path.join(args.save_dir, "student_last_distill.pth")
     torch.save({
         "teacher_backbone": "resnet18",
+        "teacher_fusion": "stage2",
         "student_backbone": "mobilefacenet",
+        "student_fusion": "bottleneck_gate",
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),
         "fusion": fusion_S.state_dict(),

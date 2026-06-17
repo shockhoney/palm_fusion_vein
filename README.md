@@ -3,7 +3,7 @@
 本项目用于掌纹/掌静脉双模态验证。当前修订版采用 **ResNet18 教师网络** 和 **MobileFaceNet+ECA 学生网络**：
 
 - Teacher：双分支 ResNet18 encoder + Stage2Fusion + ArcFace
-- Student：双分支 MobileFaceNet encoder（内置 ECA）+ Stage2Fusion + ArcFace
+- Student：双分支 MobileFaceNet encoder（内置 ECA）+ Bottleneck-Gated Fusion + ArcFace
 - Distillation：classification loss + embedding KD + relational KD + teacher-confidence weighting + ramp-up
 
 ## 环境

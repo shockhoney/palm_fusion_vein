@@ -8,15 +8,18 @@ from thop import profile
 from models.resnet18_encoder import ResNet18Encoder
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
+from models.student_fusion import Stage2FusionStudent_BottleneckGate
 
 
 class FusionSystem(nn.Module):
     def __init__(self, model_type="student", input_size=224, embed_dim=256):
         super().__init__()
-        encoder = ResNet18Encoder if model_type == "teacher" else MobileFaceNet
+        is_teacher = model_type == "teacher"
+        encoder = ResNet18Encoder if is_teacher else MobileFaceNet
         self.palm_net = encoder(input_channel=3, input_size=input_size, embedding_size=embed_dim)
         self.vein_net = encoder(input_channel=3, input_size=input_size, embedding_size=embed_dim)
-        self.fusion_net = Stage2Fusion(in_dim_global=embed_dim, out_dim_final=512, final_l2norm=True)
+        fusion = Stage2Fusion if is_teacher else Stage2FusionStudent_BottleneckGate
+        self.fusion_net = fusion(in_dim_global=embed_dim, out_dim_final=512, final_l2norm=True)
 
     def forward(self, palm, vein):
         palm_feat = self.palm_net(palm, return_spatial=False)

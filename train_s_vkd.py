@@ -16,9 +16,8 @@ from utils.metrics import compute_eer, tar_at_far
 from utils.head import Arcface_Head
 
 from models.stage1_mobileFacenet import MobileFaceNet
-from models.student_mobilefacenet import TinyMobileFaceNet
+from models.resnet18_encoder import ResNet18Encoder
 from models.stage2 import Stage2Fusion
-from models.student_fusion import Stage2FusionStudent_BottleneckGate
 
 def set_seed(seed):
     random.seed(seed)
@@ -160,7 +159,7 @@ def safe_torch_load(path, device):
 
 
 def main():
-    parser = argparse.ArgumentParser("Distill student (TinyMobileFaceNet) from teacher (MobileFaceNet)")
+    parser = argparse.ArgumentParser("Distill MobileFaceNet student from ResNet18 teacher")
     parser.add_argument("--train_list", type=str, default="data_txt/polyu_phase2_train.txt")
     parser.add_argument("--val_list", type=str, default="data_txt/polyu_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/polyu_models/stage2_best.pth")
@@ -236,16 +235,18 @@ def main():
     )
 
     # -------------------------
-    # Teacher: MobileFaceNet + Stage2Fusion + classifier (all in ckpt)
+    # Teacher: ResNet18 + Stage2Fusion + classifier (all in ckpt)
     # -------------------------
-    cnn_palm_T = MobileFaceNet(input_channel=3, input_size=224).to(device)
-    cnn_vein_T = MobileFaceNet(input_channel=3, input_size=224).to(device)
+    cnn_palm_T = ResNet18Encoder(input_channel=3, input_size=224).to(device)
+    cnn_vein_T = ResNet18Encoder(input_channel=3, input_size=224).to(device)
     feat_dim_T = cnn_palm_T.out_dim
 
     fusion_T = Stage2Fusion(in_dim_global=feat_dim_T, out_dim_final=512, final_l2norm=True).to(device)
     classifier_T = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
     ckpt = safe_torch_load(args.teacher_ckpt, device)
+    if ckpt.get("backbone") and ckpt.get("backbone") != "resnet18":
+        print(f"[WARN] teacher checkpoint backbone is {ckpt.get('backbone')}, expected resnet18")
     cnn_palm_T.load_state_dict(ckpt["cnn_palm"], strict=True)
     cnn_vein_T.load_state_dict(ckpt["cnn_vein"], strict=True)
     fusion_T.load_state_dict(ckpt["fusion"], strict=True)
@@ -257,15 +258,13 @@ def main():
             p.requires_grad = False
 
     # -------------------------
-    # Student: TinyMobileFaceNet + StudentFusion + classifier
+    # Student: MobileFaceNet + Stage2Fusion + classifier
     # -------------------------
-    cnn_palm_S = TinyMobileFaceNet(input_channel=3, embedding_size=256).to(device)
-    cnn_vein_S = TinyMobileFaceNet(input_channel=3, embedding_size=256).to(device)
+    cnn_palm_S = MobileFaceNet(input_channel=3, input_size=224).to(device)
+    cnn_vein_S = MobileFaceNet(input_channel=3, input_size=224).to(device)
     feat_dim_S = cnn_palm_S.out_dim
 
-    fusion_S = Stage2FusionStudent_BottleneckGate(
-        in_dim_global=feat_dim_S, out_dim_final=512, final_l2norm=True
-    ).to(device)
+    fusion_S = Stage2Fusion(in_dim_global=feat_dim_S, out_dim_final=512, final_l2norm=True).to(device)
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -278,8 +277,11 @@ def main():
     best_eer = 1e9
     best_path = os.path.join(args.save_dir, "student_best_distill.pth")
     conf_stats_path = os.path.join(args.save_dir, "teacher_confidence_stats.csv")
+    val_metrics_path = os.path.join(args.save_dir, "val_metrics.csv")
     with open(conf_stats_path, "w", encoding="utf-8") as f:
         f.write("epoch,count,mean,std,min,p10,p50,p90,max\n")
+    with open(val_metrics_path, "w", encoding="utf-8") as f:
+        f.write("epoch,loss,acc,eer,tar_1e-03,tar_1e-04,tar_1e-05\n")
 
     # -------------------------
     # Train
@@ -386,6 +388,14 @@ def main():
                 print(f"[VAL] Epoch {epoch}: loss={v_loss:.4f} acc={v_acc*100:.2f}% EER=NaN")
             else:
                 tar_str = " ".join([f"TAR@FAR={far:.0e}:{tar*100:.2f}%" for far, tar in tar_list])
+                tar_dict = {far: tar for far, tar in tar_list}
+                with open(val_metrics_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"{epoch},{v_loss:.8f},{v_acc:.8f},{eer:.8f},"
+                        f"{tar_dict.get(1e-3, float('nan')):.8f},"
+                        f"{tar_dict.get(1e-4, float('nan')):.8f},"
+                        f"{tar_dict.get(1e-5, float('nan')):.8f}\n"
+                    )
                 writer.add_scalar("val/EER", eer, epoch)
                 for far, tar in tar_list:
                     writer.add_scalar(f"val/TAR@FAR_{far:.0e}", tar, epoch)
@@ -394,6 +404,8 @@ def main():
                 if eer < best_eer:
                     best_eer = eer
                     torch.save({
+                        "teacher_backbone": "resnet18",
+                        "student_backbone": "mobilefacenet",
                         "cnn_palm": cnn_palm_S.state_dict(),
                         "cnn_vein": cnn_vein_S.state_dict(),
                         "fusion": fusion_S.state_dict(),
@@ -405,6 +417,8 @@ def main():
 
     last_path = os.path.join(args.save_dir, "student_last_distill.pth")
     torch.save({
+        "teacher_backbone": "resnet18",
+        "student_backbone": "mobilefacenet",
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),
         "fusion": fusion_S.state_dict(),

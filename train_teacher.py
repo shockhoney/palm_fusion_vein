@@ -12,6 +12,7 @@ import torchvision.transforms as transforms
 from tqdm import tqdm
 from models.student_mobilefacenet import TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
+from models.resnet18_encoder import ResNet18Encoder
 from models.stage2 import Stage2Fusion
 
 from utils.head import Arcface_Head 
@@ -20,7 +21,7 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
-    backbone = 'mobilefacenet'  
+    backbone = 'resnet18'  
     input_size = 224
     num_workers = 8
     seed = 42
@@ -58,7 +59,11 @@ def make_generator(seed):
 
 def build_backbone(name):
     name = name.lower()
-    if name == 'mobilefacenet':
+    if name == 'resnet18':
+        model = ResNet18Encoder(input_channel=3, input_size=config.input_size).to(config.device)
+        feat_dim = model.out_dim
+        local_dim = model.local_dim
+    elif name == 'mobilefacenet':
         model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
@@ -113,8 +118,8 @@ def get_transforms(img_size, strong=True):
     return transforms.Compose(base)
 
 def create_dataloaders_from_txt(list_file, batch_size):
-    train_tf = get_transforms(224, strong=True)
-    val_tf   = get_transforms(224, strong=False)
+    train_tf = get_transforms(config.input_size, strong=True)
+    val_tf   = get_transforms(config.input_size, strong=False)
 
     train_dataset = TxtImageDataset(list_file=list_file, split="train", transform=train_tf)
     val_dataset   = TxtImageDataset(list_file=list_file, split="val",   transform=val_tf)
@@ -266,6 +271,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
             torch.save({
+                'backbone': config.backbone,
                 'model': model.state_dict(),          
                  'classifier': classifier.state_dict()                
             }, os.path.join(config.save_dir, f'{model_name}_phase1_best_demo.pth'))
@@ -401,6 +407,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
             torch.save({
+                'backbone': config.backbone,
                 'cnn_palm': cnn_palm.state_dict(),
                 'cnn_vein': cnn_vein.state_dict(),
                 'fusion': fusion_model.state_dict(),
@@ -418,11 +425,22 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 
 def main():
     parser = argparse.ArgumentParser("Train teacher fusion model")
+    parser.add_argument("--backbone", type=str, default=config.backbone)
+    parser.add_argument("--list_file_palm", type=str, default=config.list_file_palm)
+    parser.add_argument("--list_file_vein", type=str, default=config.list_file_vein)
+    parser.add_argument("--phase2_train", type=str, default=config.phase2_train)
+    parser.add_argument("--phase2_val", type=str, default=config.phase2_val)
     parser.add_argument("--seed", type=int, default=config.seed)
     parser.add_argument("--save_dir", type=str, default=config.save_dir)
     parser.add_argument("--run_name", type=str, default=None)
+    parser.add_argument("--skip_stage1", action="store_true")
     args = parser.parse_args()
 
+    config.backbone = args.backbone
+    config.list_file_palm = args.list_file_palm
+    config.list_file_vein = args.list_file_vein
+    config.phase2_train = args.phase2_train
+    config.phase2_val = args.phase2_val
     config.seed = args.seed
     run_name = args.run_name
     config.save_dir = os.path.join(args.save_dir, run_name) if run_name else args.save_dir
@@ -435,7 +453,7 @@ def main():
     cnn_palm, feat_dim, local_dim = build_backbone(config.backbone)
     cnn_vein, _, _ = build_backbone(config.backbone)
 
-    skip_stage1 = False  # 设置为 True 跳过 Stage 1
+    skip_stage1 = args.skip_stage1
 
     if not skip_stage1:
 

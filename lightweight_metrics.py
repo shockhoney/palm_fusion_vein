@@ -1,62 +1,76 @@
+import argparse
+import time
+
 import torch
 import torch.nn as nn
 from thop import profile
+
+from models.resnet18_encoder import ResNet18Encoder
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.stage2 import Stage2Fusion
-from models.student_mobilefacenet import TinyMobileFaceNet
-from models.student_fusion import Stage2FusionStudent_BottleneckGate 
-
-class FullBiometricSystem(nn.Module):
-    def __init__(self, input_size=224, embed_dim=256):
-        super(FullBiometricSystem, self).__init__()
-        self.palm_net =TinyMobileFaceNet(input_channel=3, embedding_size=embed_dim)
-        self.vein_net =TinyMobileFaceNet(input_channel=3, embedding_size=embed_dim)
-       # self.palm_net = MobileFaceNet(input_channel=3,input_size=input_size,embedding_size=embed_dim)
-       # self.vein_net = MobileFaceNet(input_channel=3,input_size=input_size,embedding_size=embed_dim)
-        self.fusion_net = Stage2FusionStudent_BottleneckGate(in_dim_global=embed_dim, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True)     
-
-    def forward(self, img_palm, img_vein):
-        feat_palm = self.palm_net(img_palm, return_spatial=False)
-        feat_vein = self.vein_net(img_vein, return_spatial=False)   
-        final_feat = self.fusion_net(feat_palm, feat_vein)
-        
-        return final_feat
 
 
-def calculate_efficiency():
+class FusionSystem(nn.Module):
+    def __init__(self, model_type="student", input_size=224, embed_dim=256):
+        super().__init__()
+        encoder = ResNet18Encoder if model_type == "teacher" else MobileFaceNet
+        self.palm_net = encoder(input_channel=3, input_size=input_size, embedding_size=embed_dim)
+        self.vein_net = encoder(input_channel=3, input_size=input_size, embedding_size=embed_dim)
+        self.fusion_net = Stage2Fusion(in_dim_global=embed_dim, out_dim_final=512, final_l2norm=True)
 
-    INPUT_SIZE = 224
-    EMBED_DIM = 256  
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    model = FullBiometricSystem(input_size=INPUT_SIZE, embed_dim=EMBED_DIM).to(device)
-    model.eval()
+    def forward(self, palm, vein):
+        palm_feat = self.palm_net(palm, return_spatial=False)
+        vein_feat = self.vein_net(vein, return_spatial=False)
+        return self.fusion_net(palm_feat, vein_feat)
 
-    # Batch Size 设为 1，这是计算推理 FLOPs 的标准做法
-    dummy_palm = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE).to(device)
-    dummy_vein = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE).to(device)
 
-    # inputs 必须是一个 tuple，对应 forward 函数的参数
-    flops, params = profile(model, inputs=(dummy_palm, dummy_vein), verbose=False)
+@torch.no_grad()
+def benchmark_latency(model, palm, vein, warmup, iters):
+    for _ in range(warmup):
+        model(palm, vein)
+    if palm.is_cuda:
+        torch.cuda.synchronize()
 
-    GFLOPs = flops / 1e9
-    Params_M = params / 1e6
-    Model_Size_MB = (params * 4) / (1024 * 1024)
+    times = []
+    for _ in range(iters):
+        start = time.perf_counter()
+        model(palm, vein)
+        if palm.is_cuda:
+            torch.cuda.synchronize()
+        times.append((time.perf_counter() - start) * 1000)
+    t = torch.tensor(times)
+    return float(t.mean()), float(t.std(unbiased=False)), float(t.median()), float(torch.quantile(t, 0.95))
 
-    print("\n" + "="*40)
-    print(" Model lightweighting Metrics")
-    print("="*40)
-    print(f"1. Parameters:  {Params_M:.4f} M ")
-    print(f"2. FLOPs:       {GFLOPs:.4f} G ")
-    print(f"3. Model Size: {Model_Size_MB:.4f} MB ")
-    print("="*40)
 
-    palm_params = sum(p.numel() for p in model.palm_net.parameters()) / 1e6
-    fusion_params = sum(p.numel() for p in model.fusion_net.parameters()) / 1e6
-    print(f" - single Backbone:   {palm_params:.4f} M")
-    print(f" - Fusion:     {fusion_params:.4f} M")
-    print("="*40)
+def main():
+    parser = argparse.ArgumentParser("Measure complexity and latency")
+    parser.add_argument("--model", choices=["teacher", "student"], default="student")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--input_size", type=int, default=224)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--warmup", type=int, default=50)
+    parser.add_argument("--iters", type=int, default=200)
+    args = parser.parse_args()
+
+    device = torch.device(args.device)
+    model = FusionSystem(args.model, input_size=args.input_size).to(device).eval()
+    palm = torch.randn(args.batch_size, 3, args.input_size, args.input_size, device=device)
+    vein = torch.randn(args.batch_size, 3, args.input_size, args.input_size, device=device)
+
+    flops, params = profile(model, inputs=(palm, vein), verbose=False)
+    mean_ms, std_ms, p50_ms, p95_ms = benchmark_latency(model, palm, vein, args.warmup, args.iters)
+
+    print(f"model,{args.model}")
+    print(f"device,{device}")
+    print(f"batch_size,{args.batch_size}")
+    print(f"params_M,{params / 1e6:.4f}")
+    print(f"flops_G,{flops / 1e9:.4f}")
+    print(f"model_size_MB,{params * 4 / (1024 * 1024):.4f}")
+    print(f"latency_mean_ms,{mean_ms:.4f}")
+    print(f"latency_std_ms,{std_ms:.4f}")
+    print(f"latency_p50_ms,{p50_ms:.4f}")
+    print(f"latency_p95_ms,{p95_ms:.4f}")
+
 
 if __name__ == "__main__":
-    calculate_efficiency()
+    main()

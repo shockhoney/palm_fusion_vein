@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 from tqdm import tqdm
-from models.student_mobilefacenet import TinyMobileFaceNet
 from models.stage1_mobileFacenet import MobileFaceNet
 from models.resnet18_encoder import ResNet18Encoder
 from models.stage2 import Stage2Fusion
@@ -70,10 +69,6 @@ def build_backbone(name):
         local_dim = model.local_dim
     elif name == 'mobilefacenet':
         model = MobileFaceNet(input_channel=3, input_size=config.input_size).to(config.device)
-        feat_dim = model.out_dim
-        local_dim = model.local_dim
-    elif name =='tiny_mobilefacenet':
-        model = TinyMobileFaceNet(input_channel=3, embedding_size=256).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
     else:

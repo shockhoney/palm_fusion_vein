@@ -68,6 +68,20 @@ class Residual(nn.Module):
         return self.model(x)
 
 
+class ECA(nn.Module):
+    def __init__(self, channels, k_size=5):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        y = self.avg_pool(x).squeeze(-1).transpose(1, 2)
+        y = self.conv(y)
+        y = self.sigmoid(y).transpose(1, 2).unsqueeze(-1)
+        return x * y
+
+
 class MobileFaceNet(nn.Module):
 
     def __init__(self, input_channel=1, input_size=224, embedding_size=256):
@@ -81,6 +95,7 @@ class MobileFaceNet(nn.Module):
         self.conv_45 = DepthWise(64, 64, kernel=(3, 3), stride=(2, 2), padding=(1, 1), groups=256)
         self.conv_5 = Residual(64, num_block=2, groups=128, kernel=(3, 3), stride=(1, 1), padding=(1, 1))
         self.conv_6_sep = ConvBlock(64, embedding_size, kernel=(1, 1), stride=(1, 1), padding=(0, 0))
+        self.eca = ECA(embedding_size, k_size=5)
 
         # Adaptive pooling keeps the network agnostic to input_size
         self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
@@ -100,6 +115,7 @@ class MobileFaceNet(nn.Module):
         x = self.conv_45(x)
         x = self.conv_5(x)
         feat_map = self.conv_6_sep(x)
+        feat_map = self.eca(feat_map)
 
         pooled = self.global_pool(feat_map)
         embedding = pooled.reshape(pooled.size(0), -1)

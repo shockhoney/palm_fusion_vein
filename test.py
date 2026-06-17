@@ -99,7 +99,7 @@ def export_failures(path, dataset, scores, labels, i_idx, j_idx, threshold, top_
 def main():
     parser = argparse.ArgumentParser("Evaluate palmprint/palm-vein verification")
     parser.add_argument("--ckpt", default="outputs/models/student_last_distill.pth")
-    parser.add_argument("--backbone", default="mobilefacenet", choices=["mobilefacenet", "resnet18", "tiny_mobilefacenet"])
+    parser.add_argument("--backbone", default="mobilefacenet", choices=["mobilefacenet", "resnet18"])
     parser.add_argument("--palm_list", default="data_txt/PolyU_palmprint_list.txt")
     parser.add_argument("--vein_list", default="data_txt/PolyU_palmvein_list.txt")
     parser.add_argument("--pair_txt", default="data_txt/polyu_phase2_test.txt")

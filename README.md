@@ -1,113 +1,183 @@
-# 掌纹掌静脉融合识别系统
+# Palmprint--Palm-Vein Fusion Verification
 
-基于深度学习的轻量化多模态生物特征融合识别系统，采用知识蒸馏技术实现模型压缩与加速。
+本项目用于掌纹/掌静脉双模态验证。当前修订版采用 **ResNet18 教师网络** 和 **MobileFaceNet+ECA 学生网络**：
 
-## 研究背景
+- Teacher：双分支 ResNet18 encoder + Stage2Fusion + ArcFace
+- Student：双分支 MobileFaceNet encoder（内置 ECA）+ Stage2Fusion + ArcFace
+- Distillation：classification loss + embedding KD + relational KD + teacher-confidence weighting + ramp-up
 
-本项目面向生物特征识别领域，融合掌纹(Palmprint)与掌静脉(Palm Vein)两种模态信息，通过跨模态注意力机制和通道注意力融合策略，提升识别精度与鲁棒性。系统采用两阶段训练策略，并引入知识蒸馏技术将大型教师模型的知识迁移至轻量级学生模型，实现精度与效率的平衡。
+## 环境
 
-## 方法概述
+推荐使用已有 conda 环境 `pvf`：
 
-### 网络架构
-
-
-### 训练策略
-
-**阶段一：单模态预训练**
-- 分别训练掌纹、掌静脉特征提取网络
-- 使用ArcFace Loss进行度量学习
-
-**阶段二：融合模型训练**
-- 加载预训练的单模态网络
-- 引入跨模态注意力机制
-- 端到端微调融合网络
-
-**知识蒸馏**
-- 教师模型：MobileFaceNet + Stage2Fusion
-- 学生模型：TinyMobileFaceNet + StudentFusion
-- 蒸馏损失：Embedding KD + Relational KD + Classification Loss
-
-### 核心模块
-
-| 模块 | 描述 |
-|------|------|
-| MobileFaceNet | 教师骨干网络，基于深度可分离卷积 |
-| TinyMobileFaceNet | 学生骨干网络，更少的通道数和残差块，附加ECA注意力 |
-| CrossModalAttention | 跨模态注意力机制，增强模态间信息交互 |
-| ChannelAttentionFusion | 通道注意力融合，自适应学习模态权重 |
-| Stage2FusionStudent_BottleneckGate | 学生融合模块，采用瓶颈结构与门控机制 |
-
-
+```powershell
+conda activate pvf
 ```
 
-## 环境配置
+如果缺依赖，可安装：
 
-### 依赖要求
-
-- Python 3.8+
-- PyTorch 1.10+ (支持CUDA)
-- 其他依赖见 `requirements.txt`
-
-### 安装
-
-```bash
-# 安装PyTorch (根据CUDA版本选择)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# 安装其他依赖
+```powershell
 pip install -r requirements.txt
 ```
 
-## 使用方法
+PyTorch 建议按本机 CUDA 版本单独安装。例如 CUDA 11.8：
 
-### 数据准备
-
-数据集列表文件格式 (`txt-datasets/`)：
-
-**单模态列表** (用于阶段一)：
-```
-/path/to/image1.jpg label1
-/path/to/image2.jpg label2
-...
+```powershell
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
-**配对列表** (用于阶段二)：
-```
-/path/to/palm1.jpg /path/to/vein1.jpg label1
-/path/to/palm2.jpg /path/to/vein2.jpg label2
-...
-```
+## 数据准备
 
-### 训练教师模型
+原始数据应放在：
 
-```bash
-python train_teacher.py
-```
-
-训练参数配置位于脚本内Config类：
-
-### 知识蒸馏训练
-
-```bash
-python train_s_vkd.py \
-    --train_list txt-datasets/polyu_phase2_train.txt \
-    --val_list txt-datasets/polyu_phase2_val.txt \
-    --teacher_ckpt outputs/models/stage2_best.pth \
-    --epochs 200 \
-    --batch_size 16 \
-    --lambda_emb 2.0 \
-    --lambda_rel 2.0
+```text
+data/
+  CASIA/
+  CUMT/
+  PolyU/
+  tongji/
 ```
 
-### 模型测试
+生成训练、验证、测试列表：
 
-```bash
-python test.py
+```powershell
+python prepare_data_txt.py
 ```
 
-测试配置（位于脚本内Config类）：
+输出位于：
 
+```text
+data_txt/
+```
 
-## 引用
+当前协议为身份不重叠开集测试，训练:测试 = 8:2。验证集从训练身份中划分，仅用于 checkpoint 选择和融合权重选择。
 
-如果本项目对您的研究有帮助，请引用相关论文。
+查看协议统计：
+
+```powershell
+python utils\protocol_stats.py `
+  --pair-list PolyU:train=data_txt/polyu_phase2_train.txt `
+  --pair-list PolyU:val=data_txt/polyu_phase2_val.txt `
+  --pair-list PolyU:test=data_txt/polyu_phase2_test.txt
+```
+
+## 预训练权重
+
+ResNet18 教师网络默认使用本地 ImageNet 预训练权重：
+
+```text
+pretrain/resnet18_imagenet1k_v1.pth
+```
+
+如需从零训练，可传入空路径：
+
+```powershell
+--pretrained_path ""
+```
+
+## 训练 ResNet18 教师网络
+
+以 PolyU 为例：
+
+```powershell
+python train_teacher.py `
+  --backbone resnet18 `
+  --pretrained_path pretrain/resnet18_imagenet1k_v1.pth `
+  --list_file_palm data_txt/PolyU_palmprint_list.txt `
+  --list_file_vein data_txt/PolyU_palmvein_list.txt `
+  --phase2_train data_txt/polyu_phase2_train.txt `
+  --phase2_val data_txt/polyu_phase2_val.txt `
+  --save_dir outputs/teacher_resnet18 `
+  --run_name PolyU_seed42 `
+  --seed 42
+```
+
+教师 checkpoint：
+
+```text
+outputs/teacher_resnet18/PolyU_seed42/stage2_best.pth
+```
+
+## 蒸馏 MobileFaceNet+ECA 学生网络
+
+```powershell
+python train_s_vkd.py `
+  --train_list data_txt/polyu_phase2_train.txt `
+  --val_list data_txt/polyu_phase2_val.txt `
+  --teacher_ckpt outputs/teacher_resnet18/PolyU_seed42/stage2_best.pth `
+  --save_dir outputs/student_mobilefacenet `
+  --run_name PolyU_bs8_seed42 `
+  --seed 42 `
+  --batch_size 8
+```
+
+训练输出包括：
+
+- `student_best_distill.pth`
+- `student_last_distill.pth`
+- `val_metrics.csv`
+- `teacher_confidence_stats.csv`
+- `teacher_confidence_last_epoch.npy`
+
+## 多 seed 和 batch size 实验
+
+```powershell
+python scripts\run_sweeps.py `
+  --dataset PolyU `
+  --teacher_ckpt outputs/teacher_resnet18/PolyU_seed42/stage2_best.pth `
+  --save_dir outputs/student_mobilefacenet `
+  --seeds 42 43 44 `
+  --batch_sizes 8 16 32
+```
+
+汇总 mean/std：
+
+```powershell
+python scripts\summarize_runs.py --root outputs/student_mobilefacenet
+```
+
+## 测试与 failure case 导出
+
+```powershell
+python test.py `
+  --backbone mobilefacenet `
+  --ckpt outputs/student_mobilefacenet/PolyU_bs8_seed42/student_best_distill.pth `
+  --palm_list data_txt/PolyU_palmprint_list.txt `
+  --vein_list data_txt/PolyU_palmvein_list.txt `
+  --pair_txt data_txt/polyu_phase2_test.txt `
+  --out_csv outputs/eval_polyu.csv `
+  --failure_csv outputs/failure_polyu.csv
+```
+
+## 复杂度和延迟
+
+CPU latency：
+
+```powershell
+python lightweight_metrics.py --model teacher --device cpu --warmup 50 --iters 200
+python lightweight_metrics.py --model student --device cpu --warmup 50 --iters 200
+```
+
+GPU latency：
+
+```powershell
+python lightweight_metrics.py --model teacher --device cuda --warmup 50 --iters 200
+python lightweight_metrics.py --model student --device cuda --warmup 50 --iters 200
+```
+
+## 教师置信度分布
+
+```powershell
+python scripts\plot_teacher_confidence.py `
+  --npy outputs/student_mobilefacenet/PolyU_bs8_seed42/teacher_confidence_last_epoch.npy `
+  --out outputs/student_mobilefacenet/PolyU_bs8_seed42/teacher_confidence_hist.png
+```
+
+## 主要文件
+
+- `train_teacher.py`：训练 ResNet18 fusion teacher
+- `train_s_vkd.py`：训练 MobileFaceNet+ECA distilled student
+- `test.py`：评估 AUC、EER、TAR@FAR，并可导出 failure cases
+- `lightweight_metrics.py`：统计参数量、FLOPs、模型大小和 latency
+- `prepare_data_txt.py`：生成身份不重叠数据列表
+- `utils/protocol_stats.py`：统计 split 和 genuine/impostor pair 数

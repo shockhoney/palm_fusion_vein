@@ -22,6 +22,7 @@ class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
     save_dir = 'outputs/models'
     backbone = 'resnet18'  
+    pretrained_path = 'pretrain/resnet18_imagenet1k_v1.pth'
     input_size = 224
     num_workers = 8
     seed = 42
@@ -60,7 +61,11 @@ def make_generator(seed):
 def build_backbone(name):
     name = name.lower()
     if name == 'resnet18':
-        model = ResNet18Encoder(input_channel=3, input_size=config.input_size).to(config.device)
+        model = ResNet18Encoder(
+            input_channel=3,
+            input_size=config.input_size,
+            pretrained_path=config.pretrained_path,
+        ).to(config.device)
         feat_dim = model.out_dim
         local_dim = model.local_dim
     elif name == 'mobilefacenet':
@@ -272,6 +277,7 @@ def train_phase1(model, config, writer, model_name, feat_dim):
             best_acc = avg_val_acc
             torch.save({
                 'backbone': config.backbone,
+                'pretrained_path': config.pretrained_path,
                 'model': model.state_dict(),          
                  'classifier': classifier.state_dict()                
             }, os.path.join(config.save_dir, f'{model_name}_phase1_best_demo.pth'))
@@ -408,6 +414,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
             best_acc = avg_val_acc
             torch.save({
                 'backbone': config.backbone,
+                'pretrained_path': config.pretrained_path,
                 'cnn_palm': cnn_palm.state_dict(),
                 'cnn_vein': cnn_vein.state_dict(),
                 'fusion': fusion_model.state_dict(),
@@ -426,6 +433,7 @@ def train_phase2(cnn_palm, cnn_vein, config, writer, feat_dim, local_dim):
 def main():
     parser = argparse.ArgumentParser("Train teacher fusion model")
     parser.add_argument("--backbone", type=str, default=config.backbone)
+    parser.add_argument("--pretrained_path", type=str, default=config.pretrained_path)
     parser.add_argument("--list_file_palm", type=str, default=config.list_file_palm)
     parser.add_argument("--list_file_vein", type=str, default=config.list_file_vein)
     parser.add_argument("--phase2_train", type=str, default=config.phase2_train)
@@ -437,6 +445,7 @@ def main():
     args = parser.parse_args()
 
     config.backbone = args.backbone
+    config.pretrained_path = args.pretrained_path
     config.list_file_palm = args.list_file_palm
     config.list_file_vein = args.list_file_vein
     config.phase2_train = args.phase2_train

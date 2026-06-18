@@ -1,6 +1,9 @@
 import os
 import argparse
 import random
+import subprocess
+import sys
+from pathlib import Path
 import numpy as np
 
 import torch
@@ -11,7 +14,11 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from tqdm import tqdm
 
-from utils.datasets_txt import PairTxtDataset
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from utils.datasets_txt import PairTxtDataset, TxtImageDataset
 from utils.metrics import compute_eer, tar_at_far
 from utils.head import Arcface_Head
 
@@ -19,6 +26,75 @@ from models.stage1_mobileFacenet import MobileFaceNet
 from models.resnet18_encoder import ResNet18Encoder
 from models.stage2 import Stage2Fusion
 from models.student_fusion import Stage2FusionStudent_BottleneckGate
+from test import (
+    build_pair_scores,
+    eval_with_metrics,
+    export_failures,
+    extract_fusion_features,
+    extract_global_features,
+    safe_torch_load,
+)
+
+ARCH_VARIANTS = ("mobile_concat", "mobile_eca_concat", "mobile_gate", "mobile_eca_gate")
+
+
+class MobileFaceNetAblation(MobileFaceNet):
+    def __init__(self, *args, use_eca=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not use_eca:
+            self.eca = nn.Identity()
+
+
+class ConcatLinearFusion(nn.Module):
+    def __init__(self, in_dim_global=256, out_dim_final=512, final_l2norm=True):
+        super().__init__()
+        self.final_l2norm = final_l2norm
+        self.proj = nn.Linear(2 * in_dim_global, out_dim_final)
+
+    def forward(self, palm, vein):
+        fused = self.proj(torch.cat([palm, vein], dim=1))
+        return F.normalize(fused, dim=1) if self.final_l2norm else fused
+
+
+def evaluate_checkpoint(args):
+    device = torch.device(args.device)
+    checkpoint = safe_torch_load(args.ckpt, device)
+    use_eca = args.variant in {"mobile_eca_concat", "mobile_eca_gate"}
+    use_gate = args.variant in {"mobile_gate", "mobile_eca_gate"}
+    palm_net = MobileFaceNetAblation(input_channel=3, input_size=224, use_eca=use_eca).to(device)
+    vein_net = MobileFaceNetAblation(input_channel=3, input_size=224, use_eca=use_eca).to(device)
+    fusion = (
+        Stage2FusionStudent_BottleneckGate(in_dim_global=256, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True)
+        if use_gate else ConcatLinearFusion(in_dim_global=256, out_dim_final=512, final_l2norm=True)
+    ).to(device)
+    palm_net.load_state_dict(checkpoint["cnn_palm"])
+    vein_net.load_state_dict(checkpoint["cnn_vein"])
+    fusion.load_state_dict(checkpoint["fusion"])
+
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5] * 3, [0.5] * 3),
+    ])
+    palm_set = TxtImageDataset(args.palm_list, split="test", transform=transform)
+    vein_set = TxtImageDataset(args.vein_list, split="test", transform=transform)
+    palm_loader = DataLoader(palm_set, batch_size=args.test_batch_size, shuffle=False, num_workers=args.test_num_workers)
+    vein_loader = DataLoader(vein_set, batch_size=args.test_batch_size, shuffle=False, num_workers=args.test_num_workers)
+    palm_feats, palm_labels = extract_global_features(palm_net, palm_loader, device)
+    vein_feats, vein_labels = extract_global_features(vein_net, vein_loader, device)
+    palm_scores, palm_pair_labels, _, _ = build_pair_scores(palm_feats, palm_labels)
+    vein_scores, vein_pair_labels, _, _ = build_pair_scores(vein_feats, vein_labels)
+    eval_with_metrics(palm_scores, palm_pair_labels, "Palmprint only", args.out_csv)
+    eval_with_metrics(vein_scores, vein_pair_labels, "Palm-vein only", args.out_csv)
+
+    pair_set = PairTxtDataset(args.pair_txt, transform_palm=transform, transform_vein=transform)
+    pair_loader = DataLoader(pair_set, batch_size=args.test_batch_size, shuffle=False, num_workers=args.test_num_workers)
+    fused_feats, fused_labels = extract_fusion_features(palm_net, vein_net, fusion, pair_loader, device)
+    fused_scores, fused_pair_labels, i_idx, j_idx = build_pair_scores(fused_feats, fused_labels)
+    threshold = eval_with_metrics(fused_scores, fused_pair_labels, f"Fusion/{args.variant}", args.out_csv)
+    if args.failure_csv:
+        export_failures(args.failure_csv, pair_set, fused_scores, fused_pair_labels, i_idx, j_idx, threshold, args.top_k)
 
 def set_seed(seed):
     random.seed(seed)
@@ -104,11 +180,7 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
     pos = int((pair_labels == 1).sum())
     neg = int((pair_labels == 0).sum())
     if pos == 0 or neg == 0:
-        msg = (
-            f"[WARN] Validation pairs invalid for EER/TAR: pos_pairs={pos}, neg_pairs={neg}. "
-            f"原因通常是 val_list 中每个身份只出现 1 次（无法形成 genuine pair），或协议不是“按身份两两配对”。\n"
-            f"建议：确保验证集每个身份至少2张，或使用 test.py 的 pair-protocol（同/不同对）文件进行评估。"
-        )
+        msg = f"[WARN] Validation pairs invalid for EER/TAR: pos_pairs={pos}, neg_pairs={neg}."
         return float("nan"), [(far, float("nan")) for far in far_list], msg, val_loss, val_acc
 
     eer = compute_eer(scores, pair_labels, is_similarity=True)
@@ -161,6 +233,8 @@ def safe_torch_load(path, device):
 
 def main():
     parser = argparse.ArgumentParser("Distill MobileFaceNet student from ResNet18 teacher")
+    parser.add_argument("--mode", choices=["train", "test"], default="train")
+    parser.add_argument("--variant", choices=[*ARCH_VARIANTS, "all"], required=True)
     parser.add_argument("--train_list", type=str, default="data_txt/polyu_phase2_train.txt")
     parser.add_argument("--val_list", type=str, default="data_txt/polyu_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/polyu_models/stage2_best.pth")
@@ -181,8 +255,37 @@ def main():
     parser.add_argument("--lambda_rel", type=float, default=2.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
     parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--ckpt", type=str, default=None)
+    parser.add_argument("--palm_list", type=str, default=None)
+    parser.add_argument("--vein_list", type=str, default=None)
+    parser.add_argument("--pair_txt", type=str, default=None)
+    parser.add_argument("--test_batch_size", type=int, default=32)
+    parser.add_argument("--test_num_workers", type=int, default=4)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--out_csv", default=None)
+    parser.add_argument("--failure_csv", default=None)
+    parser.add_argument("--top_k", type=int, default=100)
     args = parser.parse_args()
-    run_name = args.run_name
+    if args.mode == "test":
+        if args.variant == "all":
+            parser.error("Test one variant and checkpoint at a time")
+        for name in ("ckpt", "palm_list", "vein_list", "pair_txt"):
+            if not getattr(args, name):
+                parser.error(f"--{name} is required in test mode")
+        evaluate_checkpoint(args)
+        return
+
+    if args.variant == "all":
+        if args.run_name:
+            parser.error("--run_name cannot be used with --variant all")
+        variant_index = sys.argv.index("--variant")
+        for variant in ARCH_VARIANTS:
+            child_args = sys.argv[1:].copy()
+            child_args[variant_index - 1:variant_index + 1] = ["--variant", variant]
+            subprocess.run([sys.executable, __file__, *child_args], cwd=ROOT, check=True)
+        return
+
+    run_name = args.run_name or f"student_arch_{args.variant}_seed{args.seed}"
     args.save_dir = os.path.join(args.save_dir, run_name) if run_name else args.save_dir
     os.makedirs(args.save_dir, exist_ok=True)
     set_seed(args.seed)
@@ -258,15 +361,20 @@ def main():
             p.requires_grad = False
 
     # -------------------------
-    # Student: MobileFaceNet + bottleneck-gated fusion + classifier
+    # Student architecture ablation
     # -------------------------
-    cnn_palm_S = MobileFaceNet(input_channel=3, input_size=224).to(device)
-    cnn_vein_S = MobileFaceNet(input_channel=3, input_size=224).to(device)
+    use_eca = args.variant in {"mobile_eca_concat", "mobile_eca_gate"}
+    use_gate = args.variant in {"mobile_gate", "mobile_eca_gate"}
+    cnn_palm_S = MobileFaceNetAblation(input_channel=3, input_size=224, use_eca=use_eca).to(device)
+    cnn_vein_S = MobileFaceNetAblation(input_channel=3, input_size=224, use_eca=use_eca).to(device)
     feat_dim_S = cnn_palm_S.out_dim
 
-    fusion_S = Stage2FusionStudent_BottleneckGate(
-        in_dim_global=feat_dim_S, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True
-    ).to(device)
+    if use_gate:
+        fusion_S = Stage2FusionStudent_BottleneckGate(
+            in_dim_global=feat_dim_S, out_dim_final=512, bottleneck=128, gate_hidden=32, final_l2norm=True
+        ).to(device)
+    else:
+        fusion_S = ConcatLinearFusion(in_dim_global=feat_dim_S, out_dim_final=512, final_l2norm=True).to(device)
     classifier_S = Arcface_Head(embedding_size=512, num_classes=num_classes, s=30.0, m=0.20).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -409,7 +517,8 @@ def main():
                         "teacher_backbone": "resnet18",
                         "teacher_fusion": "stage2",
                         "student_backbone": "mobilefacenet",
-                        "student_fusion": "bottleneck_gate",
+                        "student_fusion": "bottleneck_gate" if use_gate else "concat_linear",
+                        "student_arch": args.variant,
                         "cnn_palm": cnn_palm_S.state_dict(),
                         "cnn_vein": cnn_vein_S.state_dict(),
                         "fusion": fusion_S.state_dict(),
@@ -424,7 +533,8 @@ def main():
         "teacher_backbone": "resnet18",
         "teacher_fusion": "stage2",
         "student_backbone": "mobilefacenet",
-        "student_fusion": "bottleneck_gate",
+        "student_fusion": "bottleneck_gate" if use_gate else "concat_linear",
+        "student_arch": args.variant,
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),
         "fusion": fusion_S.state_dict(),

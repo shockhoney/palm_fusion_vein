@@ -1,6 +1,9 @@
 import os
 import argparse
 import random
+import subprocess
+import sys
+from pathlib import Path
 import numpy as np
 
 import torch
@@ -11,6 +14,10 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from tqdm import tqdm
 
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from utils.datasets_txt import PairTxtDataset
 from utils.metrics import compute_eer, tar_at_far
 from utils.head import Arcface_Head
@@ -19,6 +26,8 @@ from models.stage1_mobileFacenet import MobileFaceNet
 from models.resnet18_encoder import ResNet18Encoder
 from models.stage2 import Stage2Fusion
 from models.student_fusion import Stage2FusionStudent_BottleneckGate
+
+DISTILL_VARIANTS = ("cls", "emb", "rel", "emb_rel", "full_no_ramp", "full")
 
 def set_seed(seed):
     random.seed(seed)
@@ -104,11 +113,7 @@ def evaluate_eer_tar(cnn_palm, cnn_vein, fusion, loader, device, far_list,
     pos = int((pair_labels == 1).sum())
     neg = int((pair_labels == 0).sum())
     if pos == 0 or neg == 0:
-        msg = (
-            f"[WARN] Validation pairs invalid for EER/TAR: pos_pairs={pos}, neg_pairs={neg}. "
-            f"原因通常是 val_list 中每个身份只出现 1 次（无法形成 genuine pair），或协议不是“按身份两两配对”。\n"
-            f"建议：确保验证集每个身份至少2张，或使用 test.py 的 pair-protocol（同/不同对）文件进行评估。"
-        )
+        msg = f"[WARN] Validation pairs invalid for EER/TAR: pos_pairs={pos}, neg_pairs={neg}."
         return float("nan"), [(far, float("nan")) for far in far_list], msg, val_loss, val_acc
 
     eer = compute_eer(scores, pair_labels, is_similarity=True)
@@ -161,6 +166,8 @@ def safe_torch_load(path, device):
 
 def main():
     parser = argparse.ArgumentParser("Distill MobileFaceNet student from ResNet18 teacher")
+    parser.add_argument("--mode", choices=["train", "test"], default="train")
+    parser.add_argument("--variant", choices=[*DISTILL_VARIANTS, "all"], required=True)
     parser.add_argument("--train_list", type=str, default="data_txt/polyu_phase2_train.txt")
     parser.add_argument("--val_list", type=str, default="data_txt/polyu_phase2_val.txt")
     parser.add_argument("--teacher_ckpt", type=str, default="outputs/polyu_models/stage2_best.pth")
@@ -181,8 +188,59 @@ def main():
     parser.add_argument("--lambda_rel", type=float, default=2.0)
     parser.add_argument("--lambda_cls", type=float, default=1.0)
     parser.add_argument("--ramp_epochs", type=int, default=20)
+    parser.add_argument("--ckpt", type=str, default=None)
+    parser.add_argument("--palm_list", type=str, default=None)
+    parser.add_argument("--vein_list", type=str, default=None)
+    parser.add_argument("--pair_txt", type=str, default=None)
+    parser.add_argument("--test_batch_size", type=int, default=32)
+    parser.add_argument("--test_num_workers", type=int, default=4)
+    parser.add_argument("--out_csv", default=None)
+    parser.add_argument("--failure_csv", default=None)
+    parser.add_argument("--top_k", type=int, default=100)
     args = parser.parse_args()
-    run_name = args.run_name
+    if args.mode == "test":
+        if args.variant == "all":
+            parser.error("Test one variant and checkpoint at a time")
+        for name in ("ckpt", "palm_list", "vein_list", "pair_txt"):
+            if not getattr(args, name):
+                parser.error(f"--{name} is required in test mode")
+        command = [
+            sys.executable, str(ROOT / "test.py"),
+            "--backbone", "mobilefacenet",
+            "--ckpt", args.ckpt,
+            "--palm_list", args.palm_list,
+            "--vein_list", args.vein_list,
+            "--pair_txt", args.pair_txt,
+            "--batch_size", str(args.test_batch_size),
+            "--num_workers", str(args.test_num_workers),
+            "--top_k", str(args.top_k),
+        ]
+        if args.out_csv:
+            command.extend(["--out_csv", args.out_csv])
+        if args.failure_csv:
+            command.extend(["--failure_csv", args.failure_csv])
+        subprocess.run(command, cwd=ROOT, check=True)
+        return
+
+    if args.variant == "all":
+        if args.run_name:
+            parser.error("--run_name cannot be used with --variant all")
+        variant_index = sys.argv.index("--variant")
+        for variant in DISTILL_VARIANTS:
+            child_args = sys.argv[1:].copy()
+            child_args[variant_index - 1:variant_index + 1] = ["--variant", variant]
+            subprocess.run([sys.executable, __file__, *child_args], cwd=ROOT, check=True)
+        return
+
+    use_emb, use_rel, use_confidence, use_ramp = {
+        "cls": (False, False, False, False),
+        "emb": (True, False, False, True),
+        "rel": (False, True, False, True),
+        "emb_rel": (True, True, False, True),
+        "full_no_ramp": (True, True, True, False),
+        "full": (True, True, True, True),
+    }[args.variant]
+    run_name = args.run_name or f"distill_{args.variant}_seed{args.seed}"
     args.save_dir = os.path.join(args.save_dir, run_name) if run_name else args.save_dir
     os.makedirs(args.save_dir, exist_ok=True)
     set_seed(args.seed)
@@ -294,9 +352,9 @@ def main():
         fusion_S.train()
         classifier_S.train()
 
-        w = ramp(epoch, args.ramp_epochs)
-        lam_emb = args.lambda_emb * w
-        lam_rel = args.lambda_rel * w
+        w = ramp(epoch, args.ramp_epochs) if use_ramp else 1.0
+        lam_emb = args.lambda_emb * w if use_emb else 0.0
+        lam_rel = args.lambda_rel * w if use_rel else 0.0
 
         epoch_loss = 0.0
         epoch_cls = 0.0
@@ -313,13 +371,16 @@ def main():
             y = y.to(device, non_blocking=True)
 
             # ---- teacher forward (no grad) ----
-            with torch.no_grad():
-                fp_T = cnn_palm_T(palm, return_spatial=False)
-                fv_T = cnn_vein_T(vein, return_spatial=False)
-                z_T = fusion_T(fp_T, fv_T)  # (B,512)
-                logit_T = classifier_T(z_T, y)
-                conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
-                conf_values.append(conf.detach().cpu().numpy())
+            z_T = None
+            conf = None
+            if use_emb or use_rel:
+                with torch.no_grad():
+                    fp_T = cnn_palm_T(palm, return_spatial=False)
+                    fv_T = cnn_vein_T(vein, return_spatial=False)
+                    z_T = fusion_T(fp_T, fv_T)  # (B,512)
+                    logit_T = classifier_T(z_T, y)
+                    conf = F.softmax(logit_T, dim=1).max(dim=1).values.clamp(0.0, 1.0)  # (B,)
+                    conf_values.append(conf.detach().cpu().numpy())
 
             # ---- student forward ----
             fp_S = cnn_palm_S(palm, return_spatial=False)
@@ -329,12 +390,18 @@ def main():
             logit_S = classifier_S(z_S, y)
             loss_cls = ce(logit_S, y)
 
-            # embedding KD (confidence-weighted)
-            emb_per = cosine_kd_per_sample(z_S, z_T)  # (B,)
-            loss_emb = (emb_per * conf).sum() / (conf.sum() + 1e-6)
+            loss_emb = torch.zeros((), device=device)
+            if use_emb:
+                emb_per = cosine_kd_per_sample(z_S, z_T)
+                loss_emb = (
+                    (emb_per * conf).sum() / (conf.sum() + 1e-6)
+                    if use_confidence else emb_per.mean()
+                )
 
-            # relational KD (confidence-weighted)
-            loss_rel = weighted_relational_kd(z_S, z_T, conf)
+            loss_rel = torch.zeros((), device=device)
+            if use_rel:
+                rel_weights = conf if use_confidence else torch.ones_like(conf)
+                loss_rel = weighted_relational_kd(z_S, z_T, rel_weights)
 
             loss = args.lambda_cls * loss_cls + lam_emb * loss_emb + lam_rel * loss_rel
 
@@ -410,6 +477,7 @@ def main():
                         "teacher_fusion": "stage2",
                         "student_backbone": "mobilefacenet",
                         "student_fusion": "bottleneck_gate",
+                        "distill_variant": args.variant,
                         "cnn_palm": cnn_palm_S.state_dict(),
                         "cnn_vein": cnn_vein_S.state_dict(),
                         "fusion": fusion_S.state_dict(),
@@ -425,6 +493,7 @@ def main():
         "teacher_fusion": "stage2",
         "student_backbone": "mobilefacenet",
         "student_fusion": "bottleneck_gate",
+        "distill_variant": args.variant,
         "cnn_palm": cnn_palm_S.state_dict(),
         "cnn_vein": cnn_vein_S.state_dict(),
         "fusion": fusion_S.state_dict(),

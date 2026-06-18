@@ -6,11 +6,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torchvision import transforms
 from tqdm import tqdm
 
 from models.stage2 import Stage2Fusion
 from models.student_fusion import Stage2FusionStudent_BottleneckGate
-from train_teacher import build_backbone, config as train_config, get_transforms
+from train_teacher import build_backbone, config as train_config
 from utils.datasets_txt import PairTxtDataset, TxtImageDataset
 from utils.metrics import compute_eer, far_frr_acc_at_threshold, roc_auc, tar_at_far
 
@@ -137,7 +138,12 @@ def main():
     cnn_vein.load_state_dict(ckpt["cnn_vein"])
     fusion_model.load_state_dict(ckpt["fusion"])
 
-    tf_test = get_transforms(224, strong=False)
+    tf_test = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5] * 3, [0.5] * 3),
+    ])
     palm_set = TxtImageDataset(args.palm_list, split="test", transform=tf_test)
     vein_set = TxtImageDataset(args.vein_list, split="test", transform=tf_test)
     palm_loader = DataLoader(palm_set, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)

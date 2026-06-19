@@ -36,3 +36,4 @@ test-copy.py
 !requirements.txt
 
 .codex
+logs/

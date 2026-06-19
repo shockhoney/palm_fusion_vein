@@ -175,8 +175,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run_name", type=str, default=None)
 
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
 

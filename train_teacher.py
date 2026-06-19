@@ -19,22 +19,22 @@ from utils.datasets_txt import TxtImageDataset, PairTxtDataset
 
 class Config:
     device = 'cuda' if torch.cuda.is_available() else 'cpu' 
-    save_dir = 'outputs/models'
+    save_dir = 'outputs/polyu_models_42'
     backbone = 'resnet18'  
     pretrained_path = 'pretrain/resnet18_imagenet1k_v1.pth'
     input_size = 224
     num_workers = 8
     seed = 42
 
-    list_file_palm = 'data_txt/CASIA_palmprint_list.txt'
-    list_file_vein = 'data_txt/CASIA_palmvein_list.txt'
-    phase2_train = 'data_txt/CASIA_phase2_train.txt'
-    phase2_val = 'data_txt/CASIA_phase2_val.txt'
+    list_file_palm = 'data_txt/PolyU_palmprint_list.txt'
+    list_file_vein = 'data_txt/PolyU_palmvein_list.txt'
+    phase2_train = 'data_txt/polyu_phase2_train.txt'
+    phase2_val = 'data_txt/polyu_phase2_val.txt'
 
-    p1_epochs, p1_batch, p1_lr = 200, 8, 1e-2
-    p1_patience = 100
-    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 200, 8, 1e-3, 1e-4
-    p2_patience = 100
+    p1_epochs, p1_batch, p1_lr = 50, 32, 1e-2
+    p1_patience = 15
+    p2_epochs, p2_batch, p2_lr, p2_enc_lr = 50, 32, 1e-3, 1e-4
+    p2_patience = 15
 
 config = Config()
 

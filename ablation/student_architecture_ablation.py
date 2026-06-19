@@ -83,15 +83,20 @@ def evaluate_checkpoint(args):
     vein_loader = DataLoader(vein_set, batch_size=args.test_batch_size, shuffle=False, num_workers=args.test_num_workers)
     palm_feats, palm_labels = extract_global_features(palm_net, palm_loader, device)
     vein_feats, vein_labels = extract_global_features(vein_net, vein_loader, device)
-    palm_scores, palm_pair_labels, _, _ = build_pair_scores(palm_feats, palm_labels)
-    vein_scores, vein_pair_labels, _, _ = build_pair_scores(vein_feats, vein_labels)
+    palm_scores, palm_pair_labels = build_pair_scores(palm_feats, palm_labels)[:2]
+    vein_scores, vein_pair_labels = build_pair_scores(vein_feats, vein_labels)[:2]
     eval_with_metrics(palm_scores, palm_pair_labels, "Palmprint only", args.out_csv)
     eval_with_metrics(vein_scores, vein_pair_labels, "Palm-vein only", args.out_csv)
 
     pair_set = PairTxtDataset(args.pair_txt, transform_palm=transform, transform_vein=transform)
     pair_loader = DataLoader(pair_set, batch_size=args.test_batch_size, shuffle=False, num_workers=args.test_num_workers)
     fused_feats, fused_labels = extract_fusion_features(palm_net, vein_net, fusion, pair_loader, device)
-    fused_scores, fused_pair_labels, i_idx, j_idx = build_pair_scores(fused_feats, fused_labels)
+    pair_result = build_pair_scores(fused_feats, fused_labels)
+    fused_scores, fused_pair_labels = pair_result[:2]
+    if len(pair_result) == 4:
+        i_idx, j_idx = pair_result[2:]
+    else:
+        i_idx, j_idx = np.triu_indices(len(fused_labels), k=1)
     threshold = eval_with_metrics(fused_scores, fused_pair_labels, f"Fusion/{args.variant}", args.out_csv)
     if args.failure_csv:
         export_failures(args.failure_csv, pair_set, fused_scores, fused_pair_labels, i_idx, j_idx, threshold, args.top_k)
